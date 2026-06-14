@@ -1,0 +1,26 @@
+{
+  "name": "tilbudstracker",
+  "version": "0.1.0",
+  "description": "Track Danish grocery offer prices from etilbudsavis.dk over time",
+  "type": "module",
+  "scripts": {
+    "scrape": "tsx src/cli.ts scrape",
+    "stores": "tsx src/cli.ts stores",
+    "track": "tsx src/cli.ts track",
+    "untrack": "tsx src/cli.ts untrack",
+    "stats": "tsx src/cli.ts stats",
+    "gen-stores": "tsx src/gen-stores-md.ts",
+    "apply-stores": "tsx src/apply-stores.ts",
+    "build": "tsc",
+    "start": "node dist/cli.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.0",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.5.0"
+  }
+}

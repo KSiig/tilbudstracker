@@ -1,7 +1,7 @@
 FROM node:22-slim AS build
 WORKDIR /app
 COPY package.json pnpm-lock.yaml ./
-RUN corepack enable && pnpm install --frozen-lockfile
+RUN corepack enable && pnpm install --frozen-lockfile && pnpm approve-builds better-sqlite3 esbuild && pnpm install --frozen-lockfile
 COPY tsconfig.json ./
 COPY src/ src/
 RUN pnpm build
@@ -9,7 +9,7 @@ RUN pnpm build
 FROM node:22-slim
 WORKDIR /app
 COPY package.json pnpm-lock.yaml ./
-RUN corepack enable && pnpm install --frozen-lockfile --prod
+RUN corepack enable && pnpm install --frozen-lockfile --prod && pnpm approve-builds better-sqlite3 && pnpm install --frozen-lockfile --prod
 COPY --from=build /app/dist/ dist/
 RUN mkdir -p data
 CMD ["node", "dist/cli.js", "scrape"]

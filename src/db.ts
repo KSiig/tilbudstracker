@@ -1,4 +1,5 @@
 import type BetterSqlite3 from "better-sqlite3";
+import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -176,6 +177,7 @@ function requireEnv(name: string): string {
 }
 
 async function createSqliteClient(): Promise<DbClient> {
+  mkdirSync(path.dirname(DB_PATH), { recursive: true });
   const { default: Database } = await import("better-sqlite3");
   const db = new Database(DB_PATH);
   db.pragma("foreign_keys = ON");

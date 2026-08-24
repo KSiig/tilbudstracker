@@ -1,29 +1,28 @@
-import { getDb } from "./db.js";
+import { createDb } from "./db.js";
 import { scrape } from "./scrape.js";
 
 const command = process.argv[2];
 const args = process.argv.slice(3);
 
+const db = await createDb();
+
 switch (command) {
   case "scrape":
-    await scrape();
+    await scrape(db);
     break;
 
   case "stores": {
-    const db = getDb();
-    const stores = db
-      .prepare(
-        `SELECT id, name, category, isTracked, lastScrapedAt, firstSeenAt
-         FROM stores ORDER BY isTracked DESC, name`
-      )
-      .all() as {
+    const stores = await db.all<{
       id: string;
       name: string;
       category: string | null;
       isTracked: number;
       lastScrapedAt: string | null;
       firstSeenAt: string;
-    }[];
+    }>(
+      `SELECT id, name, category, isTracked, lastScrapedAt, firstSeenAt
+       FROM stores ORDER BY isTracked DESC, name`
+    );
 
     if (stores.length === 0) {
       console.log("No stores in database. Run `pnpm scrape` first.");
@@ -52,17 +51,15 @@ switch (command) {
       console.error("Usage: pnpm track <storeId>");
       process.exit(1);
     }
-    const db = getDb();
-    const result = db
-      .prepare("UPDATE stores SET isTracked = 1 WHERE id = ?")
-      .run(storeId);
-    if (result.changes === 0) {
+    await db.run("UPDATE stores SET isTracked = 1 WHERE id = ?", [storeId]);
+    const store = await db.get<{ name: string }>(
+      "SELECT name FROM stores WHERE id = ?",
+      [storeId]
+    );
+    if (!store) {
       console.error(`Store "${storeId}" not found. Run \`pnpm scrape\` first to sync stores.`);
       process.exit(1);
     }
-    const store = db
-      .prepare("SELECT name FROM stores WHERE id = ?")
-      .get(storeId) as { name: string };
     console.log(`Tracking enabled for ${store.name} (${storeId})`);
     break;
   }
@@ -73,57 +70,50 @@ switch (command) {
       console.error("Usage: pnpm untrack <storeId>");
       process.exit(1);
     }
-    const db = getDb();
-    const result = db
-      .prepare("UPDATE stores SET isTracked = 0 WHERE id = ?")
-      .run(storeId);
-    if (result.changes === 0) {
+    await db.run("UPDATE stores SET isTracked = 0 WHERE id = ?", [storeId]);
+    const store = await db.get<{ name: string }>(
+      "SELECT name FROM stores WHERE id = ?",
+      [storeId]
+    );
+    if (!store) {
       console.error(`Store "${storeId}" not found.`);
       process.exit(1);
     }
-    const store = db
-      .prepare("SELECT name FROM stores WHERE id = ?")
-      .get(storeId) as { name: string };
     console.log(`Tracking disabled for ${store.name} (${storeId})`);
     break;
   }
 
   case "stats": {
-    const db = getDb();
     const storeCount = (
-      db.prepare("SELECT COUNT(*) as c FROM stores").get() as { c: number }
-    ).c;
+      await db.get<{ c: number }>("SELECT COUNT(*) as c FROM stores")
+    )!.c;
     const trackedCount = (
-      db.prepare("SELECT COUNT(*) as c FROM stores WHERE isTracked = 1").get() as {
-        c: number;
-      }
-    ).c;
+      await db.get<{ c: number }>(
+        "SELECT COUNT(*) as c FROM stores WHERE isTracked = 1"
+      )
+    )!.c;
     const catalogCount = (
-      db.prepare("SELECT COUNT(*) as c FROM catalogs").get() as { c: number }
-    ).c;
+      await db.get<{ c: number }>("SELECT COUNT(*) as c FROM catalogs")
+    )!.c;
     const offerCount = (
-      db.prepare("SELECT COUNT(*) as c FROM offers").get() as { c: number }
-    ).c;
+      await db.get<{ c: number }>("SELECT COUNT(*) as c FROM offers")
+    )!.c;
 
     console.log(`Stores:   ${storeCount} (${trackedCount} tracked)`);
     console.log(`Catalogs: ${catalogCount}`);
     console.log(`Offers:   ${offerCount}`);
 
     if (offerCount > 0) {
-      const dateRange = db
-        .prepare(
-          "SELECT MIN(validFrom) as earliest, MAX(validUntil) as latest FROM offers"
-        )
-        .get() as { earliest: string; latest: string };
+      const dateRange = await db.get<{ earliest: string; latest: string }>(
+        "SELECT MIN(validFrom) as earliest, MAX(validUntil) as latest FROM offers"
+      );
       console.log(
-        `Date range: ${dateRange.earliest.slice(0, 10)} to ${dateRange.latest.slice(0, 10)}`
+        `Date range: ${dateRange!.earliest.slice(0, 10)} to ${dateRange!.latest.slice(0, 10)}`
       );
 
-      const byKind = db
-        .prepare(
-          "SELECT unitPriceKind, COUNT(*) as c FROM offers GROUP BY unitPriceKind ORDER BY c DESC"
-        )
-        .all() as { unitPriceKind: string; c: number }[];
+      const byKind = await db.all<{ unitPriceKind: string; c: number }>(
+        "SELECT unitPriceKind, COUNT(*) as c FROM offers GROUP BY unitPriceKind ORDER BY c DESC"
+      );
       console.log("\nUnit price breakdown:");
       for (const row of byKind) {
         const pct = ((row.c / offerCount) * 100).toFixed(0);
@@ -131,12 +121,10 @@ switch (command) {
       }
 
       const normalized = (
-        db
-          .prepare(
-            "SELECT COUNT(*) as c FROM offers WHERE normalizedUnitPrice IS NOT NULL"
-          )
-          .get() as { c: number }
-      ).c;
+        await db.get<{ c: number }>(
+          "SELECT COUNT(*) as c FROM offers WHERE normalizedUnitPrice IS NOT NULL"
+        )
+      )!.c;
       if (normalized > 0) {
         console.log(`\nLLM-normalized: ${normalized}/${offerCount}`);
       }
@@ -158,3 +146,5 @@ Commands:
       process.exit(1);
     }
 }
+
+await db.close();

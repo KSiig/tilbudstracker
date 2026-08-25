@@ -41,7 +41,7 @@ const totalTracked = (
 )!.c;
 
 console.log(
-  `Applied: ${checked.size} newly tracked, ${unchecked.size} newly untracked. Total tracked: ${totalTracked}`
+  `Applied requested updates: ${checked.size} tracked, ${unchecked.size} untracked. Total tracked: ${totalTracked}`
 );
 
 await db.close();

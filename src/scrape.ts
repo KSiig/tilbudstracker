@@ -122,22 +122,6 @@ async function scrapeStore(
       `  ${storeName}: scraping "${catalog.label}" (${catalog.offer_count} offers)`
     );
 
-    await db.run(
-      `INSERT INTO catalogs (id, storeId, label, offerCount, pageCount, publishedAt, validFrom, validUntil, scrapedAt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        catalog.id,
-        storeId,
-        catalog.label,
-        catalog.offer_count,
-        catalog.page_count,
-        catalog.publish,
-        catalog.run_from,
-        catalog.run_till,
-        now,
-      ]
-    );
-
     const offers = await fetchAllOffers(catalog.id);
     const insertOfferSql = `
       INSERT OR IGNORE INTO offers
@@ -147,35 +131,52 @@ async function scrapeStore(
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
-    const statements = offers.map((o: ApiOffer) => {
-      const unit = computeUnitPrice(o);
-      return {
-        sql: insertOfferSql,
+    const statements = [
+      {
+        sql: `INSERT INTO catalogs (id, storeId, label, offerCount, pageCount, publishedAt, validFrom, validUntil, scrapedAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         params: [
-          o.id,
           catalog.id,
           storeId,
-          o.heading,
-          o.description,
-          o.pricing.price,
-          o.pricing.pre_price,
-          o.pricing.currency,
-          o.quantity?.unit?.symbol ?? null,
-          o.quantity?.unit?.si?.symbol ?? null,
-          o.quantity?.unit?.si?.factor ?? null,
-          o.quantity?.size?.from ?? null,
-          o.quantity?.size?.to ?? null,
-          o.quantity?.pieces?.from ?? null,
-          o.quantity?.pieces?.to ?? null,
-          unit.value,
-          unit.kind,
-          o.run_from,
-          o.run_till,
-          o.images?.view ?? null,
+          catalog.label,
+          catalog.offer_count,
+          catalog.page_count,
+          catalog.publish,
+          catalog.run_from,
+          catalog.run_till,
           now,
         ],
-      };
-    });
+      },
+      ...offers.map((o: ApiOffer) => {
+        const unit = computeUnitPrice(o);
+        return {
+          sql: insertOfferSql,
+          params: [
+            o.id,
+            catalog.id,
+            storeId,
+            o.heading,
+            o.description,
+            o.pricing.price,
+            o.pricing.pre_price,
+            o.pricing.currency,
+            o.quantity?.unit?.symbol ?? null,
+            o.quantity?.unit?.si?.symbol ?? null,
+            o.quantity?.unit?.si?.factor ?? null,
+            o.quantity?.size?.from ?? null,
+            o.quantity?.size?.to ?? null,
+            o.quantity?.pieces?.from ?? null,
+            o.quantity?.pieces?.to ?? null,
+            unit.value,
+            unit.kind,
+            o.run_from,
+            o.run_till,
+            o.images?.view ?? null,
+            now,
+          ],
+        };
+      }),
+    ];
 
     await db.batch(statements);
     newCatalogs++;

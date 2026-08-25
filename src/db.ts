@@ -125,13 +125,20 @@ class D1Client implements DbClient {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ sql, params }),
+      signal: AbortSignal.timeout(30_000),
     });
 
-    const body = (await res.json()) as {
+    const text = await res.text();
+    let body: {
       result: Array<{ results: any[]; success: boolean; meta: any }>;
       success: boolean;
       errors?: Array<{ message: string }>;
     };
+    try {
+      body = JSON.parse(text);
+    } catch {
+      throw new Error(`D1 query failed (${res.status}): ${text.slice(0, 500)}`);
+    }
 
     if (!res.ok || !body.success) {
       throw new Error(
@@ -185,15 +192,28 @@ async function createSqliteClient(): Promise<DbClient> {
   return new SqliteClient(db);
 }
 
+function schemaStatements(): Array<{ sql: string }> {
+  return SCHEMA_SQL.split(";")
+    .map((statement) => statement.trim())
+    .filter((statement) => statement.length > 0)
+    .map((sql) => ({ sql }));
+}
+
 async function createD1Client(): Promise<DbClient> {
   const accountId = requireEnv("CLOUDFLARE_ACCOUNT_ID");
   const databaseId = requireEnv("CLOUDFLARE_D1_DATABASE_ID");
   const apiToken = requireEnv("CLOUDFLARE_API_TOKEN");
-  return new D1Client(accountId, databaseId, apiToken);
+  const client = new D1Client(accountId, databaseId, apiToken);
+  await client.batch(schemaStatements());
+  return client;
 }
 
 export async function createDb(mode?: DbMode): Promise<DbClient> {
-  const resolvedMode: DbMode = mode ?? (process.env.DB_MODE as DbMode | undefined) ?? "sqlite";
+  const envMode = process.env.DB_MODE;
+  if (envMode && envMode !== "sqlite" && envMode !== "d1") {
+    throw new Error(`Invalid DB_MODE: ${envMode}. Expected "sqlite" or "d1".`);
+  }
+  const resolvedMode: DbMode = mode ?? (envMode as DbMode | undefined) ?? "sqlite";
 
   if (resolvedMode === "d1") {
     return createD1Client();

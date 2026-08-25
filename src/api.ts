@@ -1,8 +1,15 @@
 import type { ApiDealer, ApiCatalog, ApiOffer } from "./types.js";
 
 const BASE_URL = "https://squid-api.tjek.com/v2";
-const API_KEY = "152000596c6e45d9983eab0c14afebea";
 const MAX_PAGE_SIZE = 100;
+
+const API_KEY: string = (() => {
+  const key = process.env.TJEK_API_KEY;
+  if (!key) {
+    throw new Error("Missing required environment variable: TJEK_API_KEY");
+  }
+  return key;
+})();
 
 async function fetchJson<T>(path: string): Promise<T> {
   const url = `${BASE_URL}${path}`;

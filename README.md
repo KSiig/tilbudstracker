@@ -8,12 +8,27 @@ The site only exposes current/upcoming offers — once a catalog expires, its da
 
 ```bash
 pnpm install
+export TJEK_API_KEY=...   # Tjek/etilbudsavis API key
 pnpm scrape          # sync all stores from the API
 pnpm stores          # list stores — find the ID of the one you want
 pnpm track 9ba51     # enable tracking for Netto
 pnpm scrape          # now scrapes Netto's current catalogs + offers
 pnpm stats           # see what's in the database
 ```
+
+## Configuration
+
+| Env var | Required for | Notes |
+|---------|---------------|-------|
+| `TJEK_API_KEY` | always | Tjek/etilbudsavis API key. Startup fails fast if unset. |
+| `DB_MODE` | optional | `sqlite` (default) or `d1`. Any other value fails at startup. |
+| `CLOUDFLARE_ACCOUNT_ID` | `DB_MODE=d1` | Cloudflare account ID. |
+| `CLOUDFLARE_D1_DATABASE_ID` | `DB_MODE=d1` | Target D1 database ID. |
+| `CLOUDFLARE_API_TOKEN` | `DB_MODE=d1` | API token with D1 edit permission. |
+
+Schema (`CREATE TABLE IF NOT EXISTS` plus indexes) is applied when the client opens, for both sqlite and d1.
+
+`apply-stores` and `gen-stores` always use local SQLite regardless of `DB_MODE`.
 
 ## Commands
 

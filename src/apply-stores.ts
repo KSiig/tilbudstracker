@@ -1,4 +1,4 @@
-import { getDb } from "./db.js";
+import { createDb } from "./db.js";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,35 +19,29 @@ for (const line of content.split("\n")) {
   else unchecked.add(id);
 }
 
-const db = getDb();
+const db = await createDb("sqlite");
 
-const trackStmt = db.prepare("UPDATE stores SET isTracked = 1 WHERE id = ?");
-const untrackStmt = db.prepare("UPDATE stores SET isTracked = 0 WHERE id = ?");
+const statements = [
+  ...Array.from(checked).map((id) => ({
+    sql: "UPDATE stores SET isTracked = 1 WHERE id = ?",
+    params: [id],
+  })),
+  ...Array.from(unchecked).map((id) => ({
+    sql: "UPDATE stores SET isTracked = 0 WHERE id = ?",
+    params: [id],
+  })),
+];
 
-const trackChanges = db.transaction(() => {
-  let tracked = 0;
-  let untracked = 0;
-
-  for (const id of checked) {
-    const r = trackStmt.run(id);
-    if (r.changes > 0) tracked++;
-  }
-  for (const id of unchecked) {
-    const r = untrackStmt.run(id);
-    if (r.changes > 0) untracked++;
-  }
-
-  return { tracked, untracked };
-});
-
-const { tracked, untracked } = trackChanges();
+await db.batch(statements);
 
 const totalTracked = (
-  db
-    .prepare("SELECT COUNT(*) as c FROM stores WHERE isTracked = 1")
-    .get() as { c: number }
-).c;
+  await db.get<{ c: number }>(
+    "SELECT COUNT(*) as c FROM stores WHERE isTracked = 1"
+  )
+)!.c;
 
 console.log(
-  `Applied: ${tracked} newly tracked, ${untracked} newly untracked. Total tracked: ${totalTracked}`
+  `Applied requested updates: ${checked.size} tracked, ${unchecked.size} untracked. Total tracked: ${totalTracked}`
 );
+
+await db.close();

@@ -1,0 +1,20 @@
+# Smoke test for KSiig/homelab/.github/workflows/cloudflare-deploy.yml
+# Verification only — do NOT merge this branch.
+
+name: Cloudflare deploy (smoke)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Smoke test homelab Cloudflare deploy workflow
+    uses: KSiig/homelab/.github/workflows/cloudflare-deploy.yml@main
+    with:
+      working_directory: .
+      command: --version
+    secrets:
+      cloudflare_api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}

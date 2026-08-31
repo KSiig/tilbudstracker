@@ -3,6 +3,18 @@ import type { ApiDealer, ApiCatalog, ApiOffer } from "./types.js";
 const BASE_URL = "https://squid-api.tjek.com/v2";
 const MAX_PAGE_SIZE = 100;
 
+/**
+ * Thrown by the Tjek client when the API responds with HTTP 429 (rate
+ * limited) or returns a Retry-After hint. The HTTP handler maps this to
+ * 503 + Retry-After: 60 (decision B3).
+ */
+export class TjekRateLimitError extends Error {
+  constructor(message: string, public readonly retryAfterSeconds?: number) {
+    super(message);
+    this.name = "TjekRateLimitError";
+  }
+}
+
 const API_KEY: string = (() => {
   const key = process.env.TJEK_API_KEY;
   if (!key) {

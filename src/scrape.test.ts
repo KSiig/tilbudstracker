@@ -161,6 +161,114 @@ describe("scrape — partial-failure compensation (decision E1)", () => {
   });
 });
 
+describe("scrape — re-listed quarantined catalog (PR #11 CodeRabbit fix)", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("uses ON CONFLICT upsert that clears quarantined = 0", async () => {
+    // Simulate the CodeRabbit scenario: a catalog that was previously
+    // quarantined (its row still exists in D1 with the same PRIMARY KEY id)
+    // re-appears in Tjek's fetchCatalogs() response. existingCatalogs
+    // includes it (no longer filtered, or filter doesn't exclude the id),
+    // so the row hits the upsert path. The catalog INSERT must clear the
+    // quarantined flag and not crash with a PRIMARY KEY conflict.
+    (fetchDealers as any).mockResolvedValue([
+      {
+        id: "store-1",
+        name: "Test",
+        website: null,
+        logo: null,
+        color: null,
+        category_ids: [],
+        country: { id: "dk" },
+      },
+    ]);
+    (fetchCatalogs as any).mockResolvedValue([
+      {
+        id: "ghost-cat",
+        label: "Tilbudsavis uge 40",
+        run_from: "2026-09-01T00:00:00Z",
+        run_till: "2026-09-07T23:59:59Z",
+        publish: "2026-08-30T00:00:00Z",
+        page_count: 2,
+        offer_count: 1,
+        dealer_id: "store-1",
+        branding: { name: "Test" },
+      },
+    ]);
+    (fetchAllOffers as any).mockResolvedValue([
+      {
+        id: "off-1",
+        heading: "Re-listed offer",
+        description: null,
+        catalog_page: null,
+        pricing: { price: 5, pre_price: null, currency: "DKK" },
+        quantity: {
+          unit: { symbol: "stk", si: { symbol: "pcs", factor: 1 } },
+          size: { from: 1, to: 1 },
+          pieces: { from: 1, to: 1, min: null, max: null },
+        },
+        images: { view: null },
+        run_from: "2026-09-01T00:00:00Z",
+        run_till: "2026-09-07T23:59:59Z",
+        dealer_id: "store-1",
+      },
+    ]);
+
+    // existingCatalogs returns [] — models the scenario where Tjek re-lists
+    // a previously-quarantined catalog and the implementation's existing-
+    // catalog query filters on `quarantined = 0` (the CodeRabbit scenario):
+    // the quarantined row exists but is excluded from existingCatalogs, so
+    // the loop does NOT skip the catalog and the upsert path runs. The
+    // upsert must not crash with PRIMARY KEY conflict and must clear the
+    // quarantined flag.
+    const db = makeMockDb({
+      allResponses: [
+        [], // 1. existing stores
+        [{ id: "store-1", name: "Test" }], // 2. firstSeenAt=new
+        [{ id: "store-1", name: "Test" }], // 3. trackedStores
+        [], // 4. zero-offer query
+        [], // 5. existingCatalogs (excludes quarantined rows)
+      ],
+      getResponses: [{ c: 1 }],
+    });
+
+    await scrape(db as unknown as DbClient);
+
+    // Find the catalog INSERT statement across all batches.
+    const catalogStatements = (db as any).batchCalls
+      .flat()
+      .filter(
+        (s: any) =>
+          typeof s.sql === "string" && s.sql.includes("INSERT INTO catalogs")
+      );
+    expect(catalogStatements.length).toBeGreaterThan(0);
+    const upsert = catalogStatements[0].sql;
+
+    // Must be an upsert, not a plain INSERT.
+    expect(upsert).toMatch(/ON CONFLICT\(id\)\s+DO UPDATE SET/);
+    expect(upsert).toMatch(/quarantined\s*=\s*0/);
+    // And the catalog id from Tjek is bound as the first parameter.
+    expect(catalogStatements[0].params[0]).toBe("ghost-cat");
+
+    // No PK conflict: scrape completed without throwing.
+    // The compensation UPDATE (quarantined = 1) must NOT have been called,
+    // because the upsert succeeded.
+    const quarantineUpdates = (db as any).runCalls.filter(
+      (c: any) =>
+        c.sql === "UPDATE catalogs SET quarantined = 1 WHERE id = ?" &&
+        Array.isArray(c.params) &&
+        c.params[0] === "ghost-cat"
+    );
+    expect(quarantineUpdates.length).toBe(0);
+  });
+});
+
 describe("scrape — zero-offer existing catalogs (decision E5)", () => {
   beforeEach(() => {
     vi.resetAllMocks();

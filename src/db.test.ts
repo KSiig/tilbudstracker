@@ -53,9 +53,15 @@ describe("D1Client.batch — POST body shape", () => {
   });
 
   it("POSTs { batch: [...] } — not a flat single-query shape", async () => {
-    let captured: { url: string; init: RequestInit } | null = null;
+    // Wrap `captured` in a mutable holder so TypeScript can narrow it after
+    // the fetch callback runs (callback-assigned `let` values stay typed as
+    // their original literal — `null` here — which would make `captured.init`
+    // type as `never` under strict null checks).
+    const captured: { value: { url: string; init: RequestInit } | null } = {
+      value: null,
+    };
     global.fetch = vi.fn(async (url, init) => {
-      captured = { url: String(url), init: init as RequestInit };
+      captured.value = { url: String(url), init: init as RequestInit };
       return new Response(
         JSON.stringify({ success: true, result: [{ success: true }] }),
         { status: 200, headers: { "content-type": "application/json" } }
@@ -69,8 +75,8 @@ describe("D1Client.batch — POST body shape", () => {
     ]);
     await db.close();
 
-    expect(captured).not.toBeNull();
-    const body = JSON.parse(String(captured!.init.body));
+    expect(captured.value).not.toBeNull();
+    const body = JSON.parse(String(captured.value!.init.body));
     expect(body).toEqual({
       batch: [
         { sql: "SELECT 1 AS x", params: [1] },

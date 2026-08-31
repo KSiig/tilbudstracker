@@ -148,7 +148,16 @@ async function scrapeStore(
 
     const catalogInsert = {
       sql: `INSERT INTO catalogs (id, storeId, label, offerCount, pageCount, publishedAt, validFrom, validUntil, scrapedAt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         label = excluded.label,
+         offerCount = excluded.offerCount,
+         pageCount = excluded.pageCount,
+         publishedAt = excluded.publishedAt,
+         validFrom = excluded.validFrom,
+         validUntil = excluded.validUntil,
+         scrapedAt = excluded.scrapedAt,
+         quarantined = 0`,
       params: [
         catalog.id,
         storeId,

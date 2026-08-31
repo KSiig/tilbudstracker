@@ -1,4 +1,5 @@
 import type { DbClient } from "./db.js";
+import { D1_BATCH_CHUNK_SIZE, quarantineWithBackoff } from "./db.js";
 import { fetchDealers, fetchCatalogs, fetchAllOffers } from "./api.js";
 import { computeUnitPrice } from "./unit-price.js";
 import type { ApiDealer, ApiCatalog, ApiOffer } from "./types.js";
@@ -106,10 +107,24 @@ async function scrapeStore(
   let newCatalogs = 0;
   let newOffers = 0;
 
+  // Quarantine any existing catalog with zero offers (decision E5). A previous
+  // partial write would have left a row behind; we want it visible (not
+  // silently skipped) but excluded from future runs.
+  const zeroOfferIds = await db.all<{ id: string }>(
+    `SELECT c.id FROM catalogs c
+     LEFT JOIN offers o ON o.catalogId = c.id
+     WHERE c.storeId = ? AND c.quarantined = 0
+     GROUP BY c.id HAVING COUNT(o.id) = 0`,
+    [storeId]
+  );
+  for (const row of zeroOfferIds) {
+    await quarantineWithBackoff(db, row.id);
+  }
+
   const existingCatalogs = new Set(
     (
       await db.all<{ id: string }>(
-        "SELECT id FROM catalogs WHERE storeId = ?",
+        "SELECT id FROM catalogs WHERE storeId = ? AND quarantined = 0",
         [storeId]
       )
     ).map((r) => r.id)
@@ -131,56 +146,73 @@ async function scrapeStore(
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
-    const statements = [
-      {
-        sql: `INSERT INTO catalogs (id, storeId, label, offerCount, pageCount, publishedAt, validFrom, validUntil, scrapedAt)
+    const catalogInsert = {
+      sql: `INSERT INTO catalogs (id, storeId, label, offerCount, pageCount, publishedAt, validFrom, validUntil, scrapedAt)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      params: [
+        catalog.id,
+        storeId,
+        catalog.label,
+        catalog.offer_count,
+        catalog.page_count,
+        catalog.publish,
+        catalog.run_from,
+        catalog.run_till,
+        now,
+      ],
+    };
+
+    const offerStatements = offers.map((o: ApiOffer) => {
+      const unit = computeUnitPrice(o);
+      return {
+        sql: insertOfferSql,
         params: [
+          o.id,
           catalog.id,
           storeId,
-          catalog.label,
-          catalog.offer_count,
-          catalog.page_count,
-          catalog.publish,
-          catalog.run_from,
-          catalog.run_till,
+          o.heading,
+          o.description,
+          o.pricing.price,
+          o.pricing.pre_price,
+          o.pricing.currency,
+          o.quantity?.unit?.symbol ?? null,
+          o.quantity?.unit?.si?.symbol ?? null,
+          o.quantity?.unit?.si?.factor ?? null,
+          o.quantity?.size?.from ?? null,
+          o.quantity?.size?.to ?? null,
+          o.quantity?.pieces?.from ?? null,
+          o.quantity?.pieces?.to ?? null,
+          unit.value,
+          unit.kind,
+          o.run_from,
+          o.run_till,
+          o.images?.view ?? null,
           now,
         ],
-      },
-      ...offers.map((o: ApiOffer) => {
-        const unit = computeUnitPrice(o);
-        return {
-          sql: insertOfferSql,
-          params: [
-            o.id,
-            catalog.id,
-            storeId,
-            o.heading,
-            o.description,
-            o.pricing.price,
-            o.pricing.pre_price,
-            o.pricing.currency,
-            o.quantity?.unit?.symbol ?? null,
-            o.quantity?.unit?.si?.symbol ?? null,
-            o.quantity?.unit?.si?.factor ?? null,
-            o.quantity?.size?.from ?? null,
-            o.quantity?.size?.to ?? null,
-            o.quantity?.pieces?.from ?? null,
-            o.quantity?.pieces?.to ?? null,
-            unit.value,
-            unit.kind,
-            o.run_from,
-            o.run_till,
-            o.images?.view ?? null,
-            now,
-          ],
-        };
-      }),
-    ];
+      };
+    });
 
-    await db.batch(statements);
-    newCatalogs++;
-    newOffers += offers.length;
+    // Build chunked batches. The catalog INSERT must land in chunk 0 so a
+    // partial failure leaves the catalog row present for compensation
+    // (decisions E1 + E2).
+    const allStatements = [catalogInsert, ...offerStatements];
+    const chunks: Array<Array<{ sql: string; params?: any[] }>> = [];
+    for (let i = 0; i < allStatements.length; i += D1_BATCH_CHUNK_SIZE) {
+      chunks.push(allStatements.slice(i, i + D1_BATCH_CHUNK_SIZE));
+    }
+
+    try {
+      for (const chunk of chunks) {
+        await db.batch(chunk);
+      }
+      newCatalogs++;
+      newOffers += offers.length;
+    } catch (err) {
+      // Soft-delete the catalog row instead of hard-deleting it (decision E1).
+      // The quarantine helper logs and continues if the UPDATE itself fails.
+      await quarantineWithBackoff(db, catalog.id);
+      throw err;
+    }
   }
 
   await db.run("UPDATE stores SET lastScrapedAt = ? WHERE id = ?", [

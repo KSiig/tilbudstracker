@@ -1,8 +1,17 @@
 import { createDb } from "./db.js";
 import { scrape } from "./scrape.js";
+import { readFileSync } from "node:fs";
 
 const command = process.argv[2];
 const args = process.argv.slice(3);
+
+function getFlag(name: string): string | undefined {
+  const prefix = `--${name}=`;
+  for (const a of args) {
+    if (a.startsWith(prefix)) return a.slice(prefix.length);
+  }
+  return undefined;
+}
 
 const db = await createDb();
 
@@ -46,9 +55,42 @@ switch (command) {
   }
 
   case "track": {
+    const listFile = getFlag("list-file");
+    if (listFile) {
+      // Bulk tracking from a newline-separated file of Tjek dealer ids.
+      // Decision D7 from SII-50: lets us flip `isTracked=1` for N stores
+      // without running `pnpm track <id>` N times.
+      const fromDb = getFlag("from");
+      if (fromDb !== "d1") {
+        console.error(
+          "`--from=d1` is required with `--list-file`. (sqlite bulk not yet supported.)"
+        );
+        process.exit(1);
+      }
+      const raw = readFileSync(listFile, "utf-8");
+      const ids = raw
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+      if (ids.length === 0) {
+        console.error(`No ids found in ${listFile}.`);
+        process.exit(1);
+      }
+      const statements = ids.map((id) => ({
+        sql: "UPDATE stores SET isTracked = 1 WHERE id = ?",
+        params: [id],
+      }));
+      await db.batch(statements);
+      console.log(
+        `Bulk-tracked ${ids.length} stores from ${listFile}: ${ids.join(", ")}`
+      );
+      break;
+    }
+
     const storeId = args[0];
     if (!storeId) {
       console.error("Usage: pnpm track <storeId>");
+      console.error("       pnpm track --from=d1 --list-file=<path>");
       process.exit(1);
     }
     await db.run("UPDATE stores SET isTracked = 1 WHERE id = ?", [storeId]);

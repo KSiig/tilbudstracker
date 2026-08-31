@@ -7,7 +7,8 @@ The site only exposes current/upcoming offers — once a catalog expires, its da
 ## Quick start
 
 ```bash
-pnpm install
+pnpm install         # NOTE: do NOT pass --prod — `better-sqlite3` is in
+                     # optionalDependencies and local sqlite needs it
 export TJEK_API_KEY=...   # Tjek/etilbudsavis API key
 pnpm scrape          # sync all stores from the API
 pnpm stores          # list stores — find the ID of the one you want
@@ -55,15 +56,9 @@ Schema (`CREATE TABLE IF NOT EXISTS` plus indexes) is applied when the client op
 
 ~35% of offers have ambiguous unit pricing (size ranges, "pcs" units with weight info only in the description text). The schema includes `normalizedUnitPrice`, `normalizedAt`, and `normalizationNote` fields for an LLM normalization pass.
 
-## Running as a CronJob
+## Running as a Cloud Function
 
-Build the Docker image and schedule it in Kubernetes:
-
-```bash
-docker build -t tilbudstracker .
-```
-
-The container runs `node dist/cli.js scrape` by default. Mount a persistent volume at `/app/data` to retain the SQLite database between runs.
+Deployment is owned by SII-50 (GCP Cloud Function + Cloud Scheduler). This issue (SII-16) only handles the local CLI split.
 
 ## Not yet implemented
 

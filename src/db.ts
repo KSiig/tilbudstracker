@@ -29,9 +29,21 @@ export interface DbClient {
 }
 
 /**
- * Typed error for D1 client failures. The `retryable` discriminant lets callers
- * (e.g. the Cloud Function handler in SII-15) decide whether to retry without
- * parsing error messages.
+ * Thrown when a D1 operation times out (request-level or our internal
+ * AbortSignal). The HTTP handler maps this to 503 + Retry-After: 30
+ * (decision B3 / SII-15).
+ */
+export class D1TimeoutError extends Error {
+  constructor(message: string, public readonly cause?: unknown) {
+    super(message);
+    this.name = "D1TimeoutError";
+  }
+}
+
+/**
+ * Typed error for D1 client failures. The `retryable` discriminant lets the
+ * HTTP handler decide whether to retry once without parsing error messages
+ * (decision B1 / SII-15).
  */
 export class D1ClientError extends Error {
   constructor(
@@ -74,7 +86,6 @@ export async function quarantineWithBackoff(
     lastErr
   );
 }
-
 const SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS stores (
     id TEXT PRIMARY KEY,

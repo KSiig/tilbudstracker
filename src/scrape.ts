@@ -1,10 +1,19 @@
 import type { DbClient } from "./db.js";
 import { D1_BATCH_CHUNK_SIZE, quarantineWithBackoff } from "./db.js";
-import { fetchDealers, fetchCatalogs, fetchAllOffers } from "./api.js";
+import {
+  fetchDealers,
+  fetchCatalogs,
+  fetchAllOffers,
+  TjekRateLimitError,
+} from "./api.js";
 import { computeUnitPrice } from "./unit-price.js";
 import type { ApiDealer, ApiCatalog, ApiOffer } from "./types.js";
 
-export async function scrape(db: DbClient): Promise<void> {
+export { TjekRateLimitError };
+
+export async function scrape(
+  db: DbClient
+): Promise<{ newCatalogs: number; newOffers: number; tracked: number }> {
   const now = new Date().toISOString();
 
   const storeStats = await syncStores(db, now);
@@ -16,7 +25,7 @@ export async function scrape(db: DbClient): Promise<void> {
     console.log(
       "No stores are tracked. Use `pnpm track <storeId>` to enable tracking."
     );
-    return;
+    return { newCatalogs: 0, newOffers: 0, tracked: 0 };
   }
 
   const trackedStores = await db.all<{ id: string; name: string }>(
@@ -35,6 +44,12 @@ export async function scrape(db: DbClient): Promise<void> {
   console.log(
     `Done: ${totalNewCatalogs} new catalogs, ${totalNewOffers} new offers`
   );
+
+  return {
+    newCatalogs: totalNewCatalogs,
+    newOffers: totalNewOffers,
+    tracked: trackedStores.length,
+  };
 }
 
 async function syncStores(

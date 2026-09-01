@@ -3,7 +3,14 @@
   "version": "0.1.0",
   "description": "Track Danish grocery offer prices from etilbudsavis.dk over time",
   "type": "module",
+  "main": "dist/handler.js",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
+    "start": "node -e \"const fs=require('fs');if(!fs.existsSync('dist/handler.js')){console.error('dist/handler.js missing. Run pnpm build first; src/handler.ts ships in the next PR in the stack (SII-15).');process.exit(1);}\" && functions-framework --target=handler --source=dist/handler.js",
+    "start:cli": "node dist/cli.js",
+    "gcp-build": "tsc",
     "scrape": "tsx src/cli.ts scrape",
     "stores": "tsx src/cli.ts stores",
     "track": "tsx src/cli.ts track",
@@ -12,10 +19,11 @@
     "gen-stores": "tsx src/gen-stores-md.ts",
     "apply-stores": "tsx src/apply-stores.ts",
     "build": "tsc",
-    "start": "node dist/cli.js",
     "test": "vitest run"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@google-cloud/functions-framework": "^3.4.0"
+  },
   "optionalDependencies": {
     "better-sqlite3": "^12.0.0"
   },

@@ -13,7 +13,7 @@ function getFlag(name: string): string | undefined {
   return undefined;
 }
 
-const db = await createDb();
+let db = await createDb();
 
 switch (command) {
   case "scrape":
@@ -67,11 +67,16 @@ switch (command) {
         );
         process.exit(1);
       }
+      // Force the bulk write to target D1 even if `DB_MODE` is unset (default
+      // sqlite). Without this, `--from=d1` would silently write to local sqlite.
+      await db.close();
+      db = await createDb("d1");
       const raw = readFileSync(listFile, "utf-8");
-      const ids = raw
+      const trimmedLines = raw
         .split(/\r?\n/)
         .map((line) => line.trim())
         .filter((line) => line.length > 0);
+      const ids = [...new Set(trimmedLines)];
       if (ids.length === 0) {
         console.error(`No ids found in ${listFile}.`);
         process.exit(1);
@@ -81,9 +86,29 @@ switch (command) {
         params: [id],
       }));
       await db.batch(statements);
-      console.log(
-        `Bulk-tracked ${ids.length} stores from ${listFile}: ${ids.join(", ")}`
+      // `db.batch()` does not return affected-row counts, so verify which ids
+      // actually exist in D1 and have `isTracked = 1` after the update.
+      const placeholders = ids.map(() => "?").join(",");
+      const actuallyTracked = await db.all<{ id: string; name: string }>(
+        `SELECT id, name FROM stores WHERE id IN (${placeholders}) AND isTracked = 1`,
+        ids
       );
+      const trackedSet = new Set(actuallyTracked.map((r) => r.id));
+      const unknown = ids.filter((id) => !trackedSet.has(id));
+      const dupes = trimmedLines.length - ids.length;
+      console.log(
+        `Bulk-tracked ${actuallyTracked.length} of ${ids.length} stores from ${listFile}: ${
+          actuallyTracked.map((r) => r.id).join(", ") || "(none)"
+        }`
+      );
+      if (unknown.length > 0) {
+        console.warn(
+          `Unknown ids (no row in D1 stores table): ${unknown.join(", ")}`
+        );
+      }
+      if (dupes > 0) {
+        console.warn(`Skipped ${dupes} duplicate input line(s).`);
+      }
       break;
     }
 

@@ -115,6 +115,16 @@ gcloud scheduler jobs create http tilbudstracker-daily \
   --oidc-token-audience="<FN_URI>"
 ```
 
+> The Scheduler SA must already have `roles/run.invoker` on the function
+> before the job runs, or Scheduler requests fail with `403`. Grant it with:
+>
+>     gcloud functions add-invoker-policy-binding tilbudstracker-scrape \
+>       --region=europe-west1 \
+>       --member="serviceAccount:tilbudstracker-scheduler@lateral-booking-506410-k4.iam.gserviceaccount.com"
+>
+> (Same `roles/run.invoker` binding as the manual `curl` SA — see
+> [Service accounts](#service-accounts) above.)
+
 ### Bootstrap a tracked store
 
 After deploy, invoke the function once with the ops SA to sync dealers, then
@@ -163,6 +173,22 @@ wrangler d1 execute homelab --remote --command "SELECT COUNT(*) AS c FROM offers
 Expected monthly GCP spend: **$0**. Spec'd usage fits well within the free tier
 for Cloud Functions (2M invocations, 360k GB-s, 180k GHz-s per month), Cloud
 Scheduler (3 jobs), and Secret Manager (10k access ops).
+
+#### Cloud Build and Artifact Registry (deploy-time, not runtime)
+
+Cloud Functions Gen 2 builds and pushes a container image on every
+`gcloud functions deploy`. Two more services see usage during deploy:
+
+- **Cloud Build:** builds the container. Free tier is **120 build-minutes/day**.
+  A typical `pnpm build` + push is ~1–2 minutes, so even with daily deploys
+  we stay well within the free tier.
+- **Artifact Registry:** stores the image in `gcf-artifacts`. Free tier is
+  ~0.5 GB-month storage. Function images are typically <300 MB and old
+  images are auto-cleaned by `gcloud functions deploy`, so this stays
+  well within the free tier.
+
+These two are billed **per billing account** (aggregated across all projects),
+not per project.
 
 ## Not yet implemented
 

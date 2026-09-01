@@ -9,6 +9,7 @@ The site only exposes current/upcoming offers — once a catalog expires, its da
 ```bash
 pnpm install         # NOTE: do NOT pass --prod — `better-sqlite3` is in
                      # optionalDependencies and local sqlite needs it
+cp .env.example .env # copy and edit; fill in your Tjek API key
 export TJEK_API_KEY=...   # Tjek/etilbudsavis API key
 pnpm scrape          # sync all stores from the API
 pnpm stores          # list stores — find the ID of the one you want

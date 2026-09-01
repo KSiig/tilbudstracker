@@ -1,10 +1,19 @@
 import { createDb } from "./db.js";
 import { scrape } from "./scrape.js";
+import { readFileSync } from "node:fs";
 
 const command = process.argv[2];
 const args = process.argv.slice(3);
 
-const db = await createDb();
+function getFlag(name: string): string | undefined {
+  const prefix = `--${name}=`;
+  for (const a of args) {
+    if (a.startsWith(prefix)) return a.slice(prefix.length);
+  }
+  return undefined;
+}
+
+let db = await createDb();
 
 switch (command) {
   case "scrape":
@@ -46,9 +55,67 @@ switch (command) {
   }
 
   case "track": {
+    const listFile = getFlag("list-file");
+    if (listFile) {
+      // Bulk tracking from a newline-separated file of Tjek dealer ids.
+      // Decision D7 from SII-50: lets us flip `isTracked=1` for N stores
+      // without running `pnpm track <id>` N times.
+      const fromDb = getFlag("from");
+      if (fromDb !== "d1") {
+        console.error(
+          "`--from=d1` is required with `--list-file`. (sqlite bulk not yet supported.)"
+        );
+        process.exit(1);
+      }
+      // Force the bulk write to target D1 even if `DB_MODE` is unset (default
+      // sqlite). Without this, `--from=d1` would silently write to local sqlite.
+      await db.close();
+      db = await createDb("d1");
+      const raw = readFileSync(listFile, "utf-8");
+      const trimmedLines = raw
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+      const ids = [...new Set(trimmedLines)];
+      if (ids.length === 0) {
+        console.error(`No ids found in ${listFile}.`);
+        process.exit(1);
+      }
+      const statements = ids.map((id) => ({
+        sql: "UPDATE stores SET isTracked = 1 WHERE id = ?",
+        params: [id],
+      }));
+      await db.batch(statements);
+      // `db.batch()` does not return affected-row counts, so verify which ids
+      // actually exist in D1 and have `isTracked = 1` after the update.
+      const placeholders = ids.map(() => "?").join(",");
+      const actuallyTracked = await db.all<{ id: string; name: string }>(
+        `SELECT id, name FROM stores WHERE id IN (${placeholders}) AND isTracked = 1`,
+        ids
+      );
+      const trackedSet = new Set(actuallyTracked.map((r) => r.id));
+      const unknown = ids.filter((id) => !trackedSet.has(id));
+      const dupes = trimmedLines.length - ids.length;
+      console.log(
+        `Bulk-tracked ${actuallyTracked.length} of ${ids.length} stores from ${listFile}: ${
+          actuallyTracked.map((r) => r.id).join(", ") || "(none)"
+        }`
+      );
+      if (unknown.length > 0) {
+        console.warn(
+          `Unknown ids (no row in D1 stores table): ${unknown.join(", ")}`
+        );
+      }
+      if (dupes > 0) {
+        console.warn(`Skipped ${dupes} duplicate input line(s).`);
+      }
+      break;
+    }
+
     const storeId = args[0];
     if (!storeId) {
       console.error("Usage: pnpm track <storeId>");
+      console.error("       pnpm track --from=d1 --list-file=<path>");
       process.exit(1);
     }
     await db.run("UPDATE stores SET isTracked = 1 WHERE id = ?", [storeId]);

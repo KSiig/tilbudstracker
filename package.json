@@ -8,7 +8,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "start": "functions-framework --target=handler --source=dist/handler.js",
+    "start": "node -e \"const fs=require('fs');if(!fs.existsSync('dist/handler.js')){console.error('dist/handler.js missing. Run pnpm build first; src/handler.ts ships in the next PR in the stack (SII-15).');process.exit(1);}\" && functions-framework --target=handler --source=dist/handler.js",
     "start:cli": "node dist/cli.js",
     "gcp-build": "tsc",
     "scrape": "tsx src/cli.ts scrape",

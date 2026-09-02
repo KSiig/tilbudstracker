@@ -127,11 +127,23 @@ describe("D1Client.batch — POST body shape", () => {
   });
 
   it("throws D1ClientError on D1 failure with retryable discriminant", async () => {
-    let calls = 0;
-    global.fetch = vi.fn(async (_url, _init) => {
-      calls++;
-      // Let the bootstrap (createD1Client) schema batch succeed.
-      if (calls === 1) {
+    const calls: string[] = [];
+    global.fetch = vi.fn(async (_url, init) => {
+      let sql = "";
+      try {
+        const body = JSON.parse(String((init as RequestInit).body));
+        sql = body.sql ?? body.batch?.[0]?.sql ?? "";
+      } catch {
+        /* ignore */
+      }
+      calls.push(sql);
+      // Let the bootstrap path (schema batch, PRAGMA, ALTER TABLE) all
+      // succeed; only fail when the user's own SQL arrives.
+      if (
+        sql.startsWith("PRAGMA") ||
+        sql.startsWith("CREATE TABLE") ||
+        sql.startsWith("ALTER TABLE")
+      ) {
         return new Response(
           JSON.stringify({ success: true, result: [{ success: true }] }),
           { status: 200, headers: { "content-type": "application/json" } }
@@ -216,5 +228,95 @@ describe("quarantineWithBackoff", () => {
 
     expect((db.run as any).mock.calls.length).toBe(3);
     vi.useRealTimers();
+  });
+});
+
+describe("D1 column migrations (forward-compatible schema runner)", () => {
+  const ORIGINAL_FETCH = global.fetch;
+  const ORIGINAL_ENV = { ...process.env };
+
+  beforeEach(() => {
+    process.env.CLOUDFLARE_ACCOUNT_ID = "acc";
+    process.env.CLOUDFLARE_D1_DATABASE_ID = "db";
+    process.env.CLOUDFLARE_API_TOKEN = "tok";
+  });
+
+  afterEach(() => {
+    process.env = { ...ORIGINAL_ENV };
+    global.fetch = ORIGINAL_FETCH;
+    vi.restoreAllMocks();
+  });
+
+  // Wrap `rows` in the { results: [...] } envelope that D1Client.all() reads.
+  const OK = (rows: any[] = [{ success: true }]) =>
+    new Response(
+      JSON.stringify({ success: true, result: [{ results: rows, success: true }] }),
+      { status: 200, headers: { "content-type": "application/json" } }
+    );
+
+  it("does NOT run ALTER TABLE when catalogs.quarantined already exists", async () => {
+    const sqlsSeen: string[] = [];
+    global.fetch = vi.fn(async (_url, init) => {
+      const body = JSON.parse(String((init as RequestInit).body));
+      const sql: string = body.sql ?? body.batch?.[0]?.sql ?? "";
+      sqlsSeen.push(sql);
+      if (sql.startsWith("PRAGMA table_info(catalogs)")) {
+        // Column already present → migration should be a no-op.
+        return OK([{ name: "quarantined" }, { name: "scrapedAt" }]);
+      }
+      return OK();
+    }) as unknown as typeof fetch;
+
+    await createDb("d1");
+
+    expect(sqlsSeen.some((s) => s.startsWith("PRAGMA table_info"))).toBe(true);
+    expect(sqlsSeen.some((s) => s.startsWith("ALTER TABLE catalogs"))).toBe(
+      false
+    );
+  });
+
+  it("runs ALTER TABLE ADD COLUMN when catalogs.quarantined is missing", async () => {
+    const sqlsSeen: string[] = [];
+    global.fetch = vi.fn(async (_url, init) => {
+      const body = JSON.parse(String((init as RequestInit).body));
+      const sql: string = body.sql ?? body.batch?.[0]?.sql ?? "";
+      sqlsSeen.push(sql);
+      if (sql.startsWith("PRAGMA table_info(catalogs)")) {
+        // Column missing — migration should add it.
+        return OK([{ name: "id" }, { name: "scrapedAt" }]);
+      }
+      return OK();
+    }) as unknown as typeof fetch;
+
+    await createDb("d1");
+
+    const alter = sqlsSeen.find((s) => s.startsWith("ALTER TABLE catalogs"));
+    expect(alter).toBeDefined();
+    expect(alter).toMatch(/ADD COLUMN quarantined/);
+    expect(alter).toMatch(/INTEGER NOT NULL DEFAULT 0/);
+  });
+
+  it("runs migrations after the schema batch (PRAGMA never precedes schema)", async () => {
+    const callOrder: string[] = [];
+    global.fetch = vi.fn(async (_url, init) => {
+      const body = JSON.parse(String((init as RequestInit).body));
+      if (body.batch) {
+        callOrder.push("schema-batch");
+      } else if (body.sql?.startsWith("PRAGMA")) {
+        callOrder.push("pragma");
+      } else if (body.sql?.startsWith("ALTER TABLE")) {
+        callOrder.push("alter");
+      }
+      if (body.sql?.startsWith("PRAGMA table_info")) {
+        return OK([{ name: "quarantined" }]); // already present
+      }
+      return OK();
+    }) as unknown as typeof fetch;
+
+    await createDb("d1");
+
+    expect(callOrder[0]).toBe("schema-batch");
+    expect(callOrder.slice(1)).toContain("pragma");
+    expect(callOrder).not.toContain("alter");
   });
 });

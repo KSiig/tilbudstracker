@@ -343,12 +343,54 @@ function schemaStatements(): Array<{ sql: string }> {
     .map((sql) => ({ sql }));
 }
 
+/**
+ * Forward-compatible column migrations. Idempotent — runs on every D1 cold
+ * start. Each entry is an `ALTER TABLE ... ADD COLUMN` that is only applied
+ * if the column is missing from the live table.
+ *
+ * Why this exists: `CREATE TABLE IF NOT EXISTS` does not add new columns to
+ * an existing table, so a freshly-merged column in SCHEMA_SQL can be silently
+ * skipped on the next deploy if the table was bootstrapped by an earlier
+ * revision. This runner closes that gap.
+ */
+const COLUMN_MIGRATIONS: ReadonlyArray<{
+  table: string;
+  column: string;
+  ddl: string;
+}> = [
+  {
+    table: "catalogs",
+    column: "quarantined",
+    ddl: "quarantined INTEGER NOT NULL DEFAULT 0",
+  },
+];
+
+async function ensureColumn(
+  client: DbClient,
+  table: string,
+  column: string,
+  ddl: string
+): Promise<void> {
+  const cols = await client.all<{ name: string }>(
+    `PRAGMA table_info(${table})`
+  );
+  if (cols.some((c) => c.name === column)) return;
+  await client.run(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+}
+
+async function runColumnMigrations(client: DbClient): Promise<void> {
+  for (const m of COLUMN_MIGRATIONS) {
+    await ensureColumn(client, m.table, m.column, m.ddl);
+  }
+}
+
 async function createD1Client(): Promise<DbClient> {
   const accountId = requireEnv("CLOUDFLARE_ACCOUNT_ID");
   const databaseId = requireEnv("CLOUDFLARE_D1_DATABASE_ID");
   const apiToken = requireEnv("CLOUDFLARE_API_TOKEN");
   const client = new D1Client(accountId, databaseId, apiToken);
   await client.batch(schemaStatements());
+  await runColumnMigrations(client);
   return client;
 }
 

@@ -130,6 +130,40 @@ describe("handler — request validation", () => {
     expect(scrape).not.toHaveBeenCalled();
   });
 
+  it("POST + body {} (Cloud Scheduler / Cloud Functions Gen 2 shape) → 200", async () => {
+    // Cloud Functions Gen 2 populates req.body = {} for POSTs with
+    // Content-Length: 0. The handler must accept this as "empty", not 400 it.
+    (scrape as any).mockResolvedValue({
+      newCatalogs: 0,
+      newOffers: 0,
+      tracked: 0,
+    });
+    const req = makeReq({ body: {} });
+    const res = new FakeRes();
+    await handler(req, res as any);
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toEqual({
+      ok: true,
+      newCatalogs: 0,
+      newOffers: 0,
+      tracked: 0,
+    });
+    expect(scrape).toHaveBeenCalledTimes(1);
+  });
+
+  it("POST + body null (raw HTTP/2 frame with no body) → 200", async () => {
+    (scrape as any).mockResolvedValue({
+      newCatalogs: 0,
+      newOffers: 0,
+      tracked: 0,
+    });
+    const req = makeReq({ body: null });
+    const res = new FakeRes();
+    await handler(req, res as any);
+    expect(res.statusCode).toBe(200);
+    expect(scrape).toHaveBeenCalledTimes(1);
+  });
+
   it("POST + query string → 400", async () => {
     const req = makeReq({ url: "/?x=1" });
     const res = new FakeRes();

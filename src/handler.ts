@@ -20,8 +20,21 @@ export const handler: HttpFunction = async (req, res) => {
   // Body/query gate: the handler has no use for either; reject anything other
   // than an empty POST to keep the request envelope small and to avoid body-
   // bombing surprises.
-  const hasBody = !!req.body && !(Buffer.isBuffer(req.body) && req.body.length === 0);
-  if (hasBody) {
+  //
+  // Cloud Functions Gen 2 + the underlying Express adapter populates
+  // `req.body = {}` for POSTs with `Content-Length: 0` (the shape Cloud
+  // Scheduler sends). Functions Framework locally leaves `req.body` as
+  // undefined or an empty string. Accept any of {undefined, null, "", empty
+  // Buffer, {}} as "empty" so the cron and curl-no-data both pass.
+  const isEmptyBody =
+    req.body === undefined ||
+    req.body === null ||
+    (typeof req.body === "string" && req.body.length === 0) ||
+    (Buffer.isBuffer(req.body) && req.body.length === 0) ||
+    (typeof req.body === "object" &&
+      !Array.isArray(req.body) &&
+      Object.keys(req.body).length === 0);
+  if (!isEmptyBody) {
     res.status(400).json({ ok: false, error: "body and query must be empty" });
     return;
   }

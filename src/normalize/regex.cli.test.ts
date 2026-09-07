@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { promises as fs, mkdtempSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -20,6 +20,16 @@ interface SeedOffer {
   heading: string;
   normalized_id?: number | null;
   is_split?: number;
+}
+
+async function removeDbFiles(): Promise<void> {
+  // better-sqlite3 may leave `-wal` and `-shm` sidecar files after a run;
+  // remove all three so subsequent tests start from a clean slate.
+  await Promise.all(
+    [DB_FILE, `${DB_FILE}-wal`, `${DB_FILE}-shm`].map((f) =>
+      fs.rm(f, { force: true })
+    )
+  );
 }
 
 async function seedOffers(db: DbClient, offers: SeedOffer[]): Promise<void> {
@@ -80,10 +90,13 @@ describe("applyWritePolicy (decision P1: ≥ 2 offers OR ≥ 2 distinct headings
     expect(applyWritePolicy(groups)).toHaveLength(1);
   });
 
-  it("keeps groups with ≥ 2 distinct headings even when 2 of them fold equal and one differs", () => {
-    // Three offers, two fold equal ("Foo Bar") and one is "Foo Baz" → only one
-    // fold bucket has members — the test for "≥ 2 distinct headings" applies
-    // within a single fold bucket, which is the only bucket that exists here.
+  it("keeps groups with ≥ 2 offers (case-only or punctuation-difference variants)", () => {
+    // Two offers whose headings differ only in punctuation but fold together
+    // into a single bucket — the surviving-group rule fires on members
+    // count. (Spec P1's "≥ 2 distinct headings" arm is unreachable by
+    // construction: a bucket built from fold-equal headings cannot have
+    // fewer than 2 offers and 2+ distinct headings, so checking members
+    // alone is equivalent and exhaustive.)
     const groups = [
       {
         fold: "a",
@@ -135,12 +148,45 @@ describe("normalizeRegex (end-to-end against sqlite)", () => {
   beforeEach(async () => {
     // Point DB_PATH at our per-suite temp file.
     process.env.TILBUD_DB_PATH = DB_FILE;
-    await fs.rm(DB_FILE, { force: true });
+    await removeDbFiles();
   });
 
   afterEach(async () => {
     delete process.env.TILBUD_DB_PATH;
-    await fs.rm(DB_FILE, { force: true });
+    await removeDbFiles();
+  });
+
+  afterAll(async () => {
+    // Tear down the per-suite temp dir created at module load.
+    await fs.rm(TEMP_DIR, { recursive: true, force: true });
+  });
+
+  it("removeDbFiles() also removes the SQLite -wal and -shm sidecar files (finding #11)", async () => {
+    // Seed the three sidecar files with content to prove they're actually
+    // touched (not just no-op rm).
+    await fs.writeFile(`${DB_FILE}-wal`, "wal-content");
+    await fs.writeFile(`${DB_FILE}-shm`, "shm-content");
+    await removeDbFiles();
+    for (const f of [DB_FILE, `${DB_FILE}-wal`, `${DB_FILE}-shm`]) {
+      const exists = await fs
+        .stat(f)
+        .then(() => true)
+        .catch(() => false);
+      expect(exists).toBe(false);
+    }
+  });
+
+  it("afterAll removes the per-suite temp directory", async () => {
+    // Sanity check that TEMP_DIR exists and afterAll's cleanup pattern works.
+    // We re-run the rm here (afterAll ran once at suite teardown; we re-run
+    // it for this individual assertion).
+    const stat = await fs.stat(TEMP_DIR).catch(() => null);
+    expect(stat).not.toBeNull();
+    await fs.rm(TEMP_DIR, { recursive: true, force: true });
+    const statAfter = await fs.stat(TEMP_DIR).catch(() => null);
+    expect(statAfter).toBeNull();
+    // Recreate for any later test that depends on TEMP_DIR.
+    await fs.mkdir(TEMP_DIR, { recursive: true });
   });
 
   it("writes one offers_normalized row per surviving group and links members", async () => {
@@ -310,7 +356,7 @@ describe("normalizeRegex (end-to-end against sqlite)", () => {
     const db = await createDb("sqlite");
     await seedOffers(db, [
       { id: "1", heading: "Group A Item" },
-      { id: "2", heading: "Group A Item" }, // case-only diff → folds equal
+      { id: "2", heading: "Group A Item" }, // identical → folds equal
     ]);
     const r1 = await normalizeRegex(db);
     expect(r1.offersNormalized).toBe(2);

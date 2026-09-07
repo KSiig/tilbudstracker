@@ -52,15 +52,17 @@ const NOW = () => new Date().toISOString();
 
 /**
  * Filter groups by the Write Policy (decision P1, locked 2026-09-06): keep
- * only groups with ≥ 2 offers OR ≥ 2 distinct headings. Singletons (1 offer,
- * 1 distinct heading) are skipped — Pass 3 picks them up via the LLM.
+ * only groups with ≥ 2 offers. The spec text reads "≥ 2 offers OR ≥ 2
+ * distinct headings", but because {@link groupByFold} buckets offers by their
+ * folded key, a single bucket can never contain fewer than 2 offers and 2+
+ * distinct headings — fold-equal headings collapse into the same bucket, so
+ * `distinctHeadings.size >= 2` with `members.length < 2` is unreachable. A
+ * group with ≥ 2 members always has ≥ 2 distinct headings (when they happen
+ * to differ in punctuation/case) or ≥ 2 fold-equal members; either way it
+ * passes. Singletons are skipped — Pass 3 picks them up via the LLM.
  */
 export function applyWritePolicy(groups: Group[]): Group[] {
-  return groups.filter((g) => {
-    if (g.members.length >= 2) return true;
-    const distinctHeadings = new Set(g.members.map((m) => m.heading));
-    return distinctHeadings.size >= 2;
-  });
+  return groups.filter((g) => g.members.length >= 2);
 }
 
 /**

@@ -132,7 +132,9 @@ gcloud scheduler jobs create http tilbudstracker-daily \
 The weekly `tilbudstracker-weekly-normalize` job runs the function on
 **Sunday 06:30 Europe/Copenhagen** to perform heading normalization (Pass 1
 bundles → Pass 2 trivial fold → Pass 3 LLM) on the offers accumulated since
-the previous week's run:
+the previous week's run. It must pass `X-Weekly-Normalize: true` so the
+handler actually triggers the normalize passes; the daily job omits the
+header and gets scrape-only:
 
 ```bash
 gcloud scheduler jobs create http tilbudstracker-weekly-normalize \
@@ -144,6 +146,7 @@ gcloud scheduler jobs create http tilbudstracker-weekly-normalize \
   --attempt-deadline=320s \
   --max-retry-attempts=1 \
   --min-backoff=60s \
+  --headers="X-Weekly-Normalize=true" \
   --oidc-service-account-email=tilbudstracker-scheduler@lateral-booking-506410-k4.iam.gserviceaccount.com \
   --oidc-token-audience="<FN_URI>"
 ```

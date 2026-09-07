@@ -141,12 +141,14 @@ describe("D1Client.batch — POST body shape", () => {
       calls.push(sql);
       // Let the bootstrap path (schema batch, PRAGMA, ALTER TABLE, sqlite_master
       // reads done by ensureIndex) all succeed; only fail when the user's own
-      // SQL arrives.
+      // SQL arrives. CREATE UNIQUE INDEX is also part of the bootstrap (the
+      // bundle-split idempotency index added in SII-72 + this review).
       if (
         sql.startsWith("PRAGMA") ||
         sql.startsWith("CREATE TABLE") ||
         sql.startsWith("ALTER TABLE") ||
         sql.startsWith("CREATE INDEX") ||
+        sql.startsWith("CREATE UNIQUE INDEX") ||
         sql.includes("FROM sqlite_master")
       ) {
         return new Response(
@@ -306,12 +308,16 @@ describe("D1 column migrations (forward-compatible schema runner)", () => {
     // Per-table mock: return the right "already present" columns so all
     // migrations become no-ops on this run. The point of this test is the
     // *order* (schema → pragma → optional alter), not which migrations fire.
+    // bundle_split_id + position were added for the bundle idempotency key
+    // (SII-72 + this stack-review).
     const existingColsByTable: Record<string, Array<{ name: string }>> = {
       catalogs: [{ name: "quarantined" }],
       offers: [
         { name: "normalized_id" },
         { name: "is_split" },
         { name: "bundle_ids" },
+        { name: "bundle_split_id" },
+        { name: "position" },
       ],
     };
     global.fetch = vi.fn(async (_url, init) => {
@@ -410,7 +416,7 @@ describe("SII-68 schema — local sqlite path", () => {
     await db.close();
   });
 
-  it("runColumnMigrations() adds the three new columns to a legacy offers table (idempotent upgrade)", async () => {
+  it("runColumnMigrations() adds the SII-68 + bundle-idem columns to a legacy offers table (idempotent upgrade)", async () => {
     // Seed a "legacy" sqlite file: same schema as pre-SII-68 (no new columns
     // on offers, no offers_normalized table). Then run createDb("sqlite") —
     // runColumnMigrations() should ADD COLUMN for each new column and CREATE
@@ -434,9 +440,13 @@ describe("SII-68 schema — local sqlite path", () => {
     const db = await createDb("sqlite");
     const cols = await db.all<{ name: string }>(`PRAGMA table_info(offers)`);
     const names = cols.map((c) => c.name);
+    // SII-68 columns
     expect(names).toContain("normalized_id");
     expect(names).toContain("is_split");
     expect(names).toContain("bundle_ids");
+    // SII-72 bundle-idem columns
+    expect(names).toContain("bundle_split_id");
+    expect(names).toContain("position");
 
     // offers_normalized should also exist now.
     const tables = await db.all<{ name: string }>(

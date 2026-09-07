@@ -10,12 +10,13 @@ export function buildPrompt(headings: string[]): string {
   const lines = headings.map((h, i) => `${i}. ${h}`).join("\n");
   return `You cluster Danish grocery offer headings. Your job: identify which headings describe the SAME physical product.
 
-Output JSON only, in this exact shape:
-{{
+You MUST call the \`record_clusters\` tool exactly once with your final answer. The tool's \`arguments\` must be JSON of this exact shape (single-brace; double-brace placeholders are NOT valid here, only the schema description is):
+
+{
   "clusters": [
-    {{"title": "<canonical short product name>", "member_indices": [0, 2, 3]}}
+    {"title": "<canonical short product name>", "member_indices": [0, 2, 3]}
   ]
-}}
+}
 
 Rules:
 - A heading belongs to AT MOST ONE cluster.
@@ -23,6 +24,7 @@ Rules:
 - "Dansk hel kylling" and "Rose Fersk Dansk Hel Kylling" = SAME (whole chicken, rose brand).
 - "Dansk hel kylling" and "Rose hakket dansk kyllingekød" = DIFFERENT (whole vs ground).
 - Headings you are unsure about: omit them (return no cluster for them).
+- Do NOT return raw JSON or any prose outside the tool call — the tool call IS the response.
 
 Input headings:
 ${lines}`;

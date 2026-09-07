@@ -35,9 +35,24 @@ vi.mock("./db.js", () => {
   };
 });
 
+vi.mock("./normalize/bundle.cli.js", () => ({
+  normalizeBundles: vi.fn(),
+}));
+
+vi.mock("./normalize/regex.cli.js", () => ({
+  normalizeRegex: vi.fn(),
+}));
+
+vi.mock("./normalize/llm.js", () => ({
+  normalizeLlm: vi.fn(),
+}));
+
 import { handler } from "./handler.js";
 import { scrape, TjekRateLimitError } from "./scrape.js";
 import { createDb, D1ClientError, D1TimeoutError } from "./db.js";
+import { normalizeBundles } from "./normalize/bundle.cli.js";
+import { normalizeRegex } from "./normalize/regex.cli.js";
+import { normalizeLlm } from "./normalize/llm.js";
 
 class FakeRes {
   headers: Record<string, string> = {};
@@ -76,10 +91,28 @@ function makeReq(opts: {
 
 const closeMock = vi.fn().mockResolvedValue(undefined);
 
+const PASS1_RESULT = { bundlesDetected: 2, newOffersCreated: 6 };
+const PASS2_RESULT = { groupsProcessed: 3, offersNormalized: 12 };
+const PASS3_RESULT = {
+  promptsSent: 5,
+  clustersCreated: 4,
+  offersNormalized: 9,
+  capReached: false,
+  remainder: 0,
+};
+
 beforeEach(() => {
   vi.resetAllMocks();
   closeMock.mockClear();
   (createDb as any).mockResolvedValue({ close: closeMock });
+  (scrape as any).mockResolvedValue({
+    newCatalogs: 1,
+    newOffers: 2,
+    tracked: 1,
+  });
+  (normalizeBundles as any).mockResolvedValue(PASS1_RESULT);
+  (normalizeRegex as any).mockResolvedValue(PASS2_RESULT);
+  (normalizeLlm as any).mockResolvedValue(PASS3_RESULT);
 });
 
 afterEach(() => {
@@ -87,12 +120,7 @@ afterEach(() => {
 });
 
 describe("handler — happy path", () => {
-  it("POST + scrape resolves with counts → 200 JSON", async () => {
-    (scrape as any).mockResolvedValue({
-      newCatalogs: 1,
-      newOffers: 2,
-      tracked: 1,
-    });
+  it("POST + scrape resolves with counts → 200 JSON including normalize block", async () => {
     const req = makeReq();
     const res = new FakeRes();
     await handler(req, res as any);
@@ -102,9 +130,32 @@ describe("handler — happy path", () => {
       newCatalogs: 1,
       newOffers: 2,
       tracked: 1,
+      normalize: { pass1: PASS1_RESULT, pass2: PASS2_RESULT, pass3: PASS3_RESULT },
     });
     expect(closeMock).toHaveBeenCalledTimes(1);
     expect(createDb).toHaveBeenCalledWith("d1");
+    expect(normalizeBundles).toHaveBeenCalledTimes(1);
+    expect(normalizeRegex).toHaveBeenCalledTimes(1);
+    expect(normalizeLlm).toHaveBeenCalledTimes(1);
+  });
+
+  it("runs normalize passes in order: pass1 (bundles) → pass2 (regex) → pass3 (llm)", async () => {
+    const callOrder: string[] = [];
+    (normalizeBundles as any).mockImplementation(async () => {
+      callOrder.push("pass1");
+      return PASS1_RESULT;
+    });
+    (normalizeRegex as any).mockImplementation(async () => {
+      callOrder.push("pass2");
+      return PASS2_RESULT;
+    });
+    (normalizeLlm as any).mockImplementation(async () => {
+      callOrder.push("pass3");
+      return PASS3_RESULT;
+    });
+
+    await handler(makeReq(), new FakeRes() as any);
+    expect(callOrder).toEqual(["pass1", "pass2", "pass3"]);
   });
 });
 
@@ -131,8 +182,6 @@ describe("handler — request validation", () => {
   });
 
   it("POST + body {} (Cloud Scheduler / Cloud Functions Gen 2 shape) → 200", async () => {
-    // Cloud Functions Gen 2 populates req.body = {} for POSTs with
-    // Content-Length: 0. The handler must accept this as "empty", not 400 it.
     (scrape as any).mockResolvedValue({
       newCatalogs: 0,
       newOffers: 0,
@@ -142,11 +191,11 @@ describe("handler — request validation", () => {
     const res = new FakeRes();
     await handler(req, res as any);
     expect(res.statusCode).toBe(200);
-    expect(res.body).toEqual({
-      ok: true,
-      newCatalogs: 0,
-      newOffers: 0,
-      tracked: 0,
+    expect(res.body.ok).toBe(true);
+    expect(res.body.normalize).toEqual({
+      pass1: PASS1_RESULT,
+      pass2: PASS2_RESULT,
+      pass3: PASS3_RESULT,
     });
     expect(scrape).toHaveBeenCalledTimes(1);
   });
@@ -240,6 +289,79 @@ describe("handler — error classification", () => {
     expect(res.statusCode).toBe(500);
     expect(res.body.error).toBe("boom");
     expect(closeMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("handler — normalize passes (SII-71)", () => {
+  it("response includes normalize: { pass1, pass2, pass3 } on success", async () => {
+    const res = new FakeRes();
+    await handler(makeReq(), res as any);
+    expect(res.statusCode).toBe(200);
+    expect(res.body.normalize).toEqual({
+      pass1: PASS1_RESULT,
+      pass2: PASS2_RESULT,
+      pass3: PASS3_RESULT,
+    });
+  });
+
+  it("normalize pass1 throws → pass1 is null, pass2/pass3 still run, response is 200", async () => {
+    (normalizeBundles as any).mockRejectedValue(new Error("bundles boom"));
+    const res = new FakeRes();
+    await handler(makeReq(), res as any);
+    expect(res.statusCode).toBe(200);
+    expect(res.body.normalize.pass1).toBeNull();
+    expect(res.body.normalize.pass2).toEqual(PASS2_RESULT);
+    expect(res.body.normalize.pass3).toEqual(PASS3_RESULT);
+    expect(normalizeRegex).toHaveBeenCalledTimes(1);
+    expect(normalizeLlm).toHaveBeenCalledTimes(1);
+  });
+
+  it("normalize pass2 throws → pass2 is null, pass1/pass3 still run, response is 200", async () => {
+    (normalizeRegex as any).mockRejectedValue(new Error("regex boom"));
+    const res = new FakeRes();
+    await handler(makeReq(), res as any);
+    expect(res.statusCode).toBe(200);
+    expect(res.body.normalize.pass1).toEqual(PASS1_RESULT);
+    expect(res.body.normalize.pass2).toBeNull();
+    expect(res.body.normalize.pass3).toEqual(PASS3_RESULT);
+    expect(normalizeBundles).toHaveBeenCalledTimes(1);
+    expect(normalizeLlm).toHaveBeenCalledTimes(1);
+  });
+
+  it("normalize pass3 throws → pass3 is null, pass1/pass2 still run, response is 200", async () => {
+    (normalizeLlm as any).mockRejectedValue(new Error("llm boom"));
+    const res = new FakeRes();
+    await handler(makeReq(), res as any);
+    expect(res.statusCode).toBe(200);
+    expect(res.body.normalize.pass1).toEqual(PASS1_RESULT);
+    expect(res.body.normalize.pass2).toEqual(PASS2_RESULT);
+    expect(res.body.normalize.pass3).toBeNull();
+    expect(normalizeBundles).toHaveBeenCalledTimes(1);
+    expect(normalizeRegex).toHaveBeenCalledTimes(1);
+  });
+
+  it("all normalize passes throw → all three are null, response is 200, scrape counts still present", async () => {
+    (normalizeBundles as any).mockRejectedValue(new Error("p1"));
+    (normalizeRegex as any).mockRejectedValue(new Error("p2"));
+    (normalizeLlm as any).mockRejectedValue(new Error("p3"));
+    const res = new FakeRes();
+    await handler(makeReq(), res as any);
+    expect(res.statusCode).toBe(200);
+    expect(res.body.normalize).toEqual({ pass1: null, pass2: null, pass3: null });
+    expect(res.body.newCatalogs).toBe(1);
+    expect(res.body.newOffers).toBe(2);
+    expect(res.body.tracked).toBe(1);
+  });
+
+  it("scrape failure still skips all normalize passes (error path unchanged)", async () => {
+    (scrape as any).mockRejectedValue(new Error("scrape boom"));
+    const res = new FakeRes();
+    await handler(makeReq(), res as any);
+    expect(res.statusCode).toBe(500);
+    expect(res.body.error).toBe("scrape boom");
+    expect(normalizeBundles).not.toHaveBeenCalled();
+    expect(normalizeRegex).not.toHaveBeenCalled();
+    expect(normalizeLlm).not.toHaveBeenCalled();
   });
 });
 

@@ -70,6 +70,7 @@ The handler is `src/handler.ts` (entry point `handler`).
 |-----|--------|
 | `TJEK_API_KEY` | Secret Manager: `tjek-api-key:latest` |
 | `CLOUDFLARE_API_TOKEN` | Secret Manager: `cloudflare-api-token:latest` |
+| `MINIMAX_API_KEY_PERSONAL` | Secret Manager: `minimax-api-key:latest` |
 | `DB_MODE` | `--set-env-vars=DB_MODE=d1` |
 | `CLOUDFLARE_ACCOUNT_ID` | `--set-env-vars=CLOUDFLARE_ACCOUNT_ID=<acc>` |
 | `CLOUDFLARE_D1_DATABASE_ID` | `--set-env-vars=CLOUDFLARE_D1_DATABASE_ID=<db>` |
@@ -97,7 +98,7 @@ gcloud functions deploy tilbudstracker-scrape \
   --max-instances=1 \
   --run-service-account=tilbudstracker-fn@lateral-booking-506410-k4.iam.gserviceaccount.com \
   --set-env-vars="DB_MODE=d1,CLOUDFLARE_ACCOUNT_ID=5b3269050c8afff008527d038d4f2538,CLOUDFLARE_D1_DATABASE_ID=f4c3b701-9150-472d-b20b-e2530b7ca1b9" \
-  --set-secrets="TJEK_API_KEY=tjek-api-key:latest,CLOUDFLARE_API_TOKEN=cloudflare-api-token:latest"
+  --set-secrets="TJEK_API_KEY=tjek-api-key:latest,CLOUDFLARE_API_TOKEN=cloudflare-api-token:latest,MINIMAX_API_KEY_PERSONAL=minimax-api-key:latest"
 ```
 
 ### Cloud Scheduler
@@ -106,6 +107,25 @@ gcloud functions deploy tilbudstracker-scrape \
 gcloud scheduler jobs create http tilbudstracker-daily \
   --location=europe-west1 \
   --schedule="0 6 * * *" \
+  --time-zone="Europe/Copenhagen" \
+  --uri="<FN_URI from gcloud functions describe>" \
+  --http-method=POST \
+  --attempt-deadline=320s \
+  --max-retry-attempts=1 \
+  --min-backoff=60s \
+  --oidc-service-account-email=tilbudstracker-scheduler@lateral-booking-506410-k4.iam.gserviceaccount.com \
+  --oidc-token-audience="<FN_URI>"
+```
+
+The weekly `tilbudstracker-weekly-normalize` job runs the function on
+**Sunday 06:30 Europe/Copenhagen** to perform heading normalization (Pass 1
+bundles → Pass 2 trivial fold → Pass 3 LLM) on the offers accumulated since
+the previous week's run:
+
+```bash
+gcloud scheduler jobs create http tilbudstracker-weekly-normalize \
+  --location=europe-west1 \
+  --schedule="30 6 * * 0" \
   --time-zone="Europe/Copenhagen" \
   --uri="<FN_URI from gcloud functions describe>" \
   --http-method=POST \

@@ -16,6 +16,7 @@
     "track": "tsx src/cli.ts track",
     "untrack": "tsx src/cli.ts untrack",
     "stats": "tsx src/cli.ts stats",
+    "normalize:bundles": "tsx src/normalize/bundle.cli.ts",
     "gen-stores": "tsx src/gen-stores-md.ts",
     "apply-stores": "tsx src/apply-stores.ts",
     "build": "tsc",

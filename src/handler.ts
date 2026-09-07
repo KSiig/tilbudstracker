@@ -1,6 +1,32 @@
 import type { HttpFunction } from "@google-cloud/functions-framework";
-import { createDb, D1ClientError, D1TimeoutError } from "./db.js";
+import { createDb, D1ClientError, D1TimeoutError, type DbClient } from "./db.js";
 import { scrape as scrapeFn, TjekRateLimitError } from "./scrape.js";
+import { normalizeBundles } from "./normalize/bundle.cli.js";
+import { normalizeRegex } from "./normalize/regex.cli.js";
+import { normalizeLlm } from "./normalize/llm.js";
+
+// Cloud Function runtime budget: `--timeout=300s` and scheduler
+// `--attempt-deadline=320s`. The LLM pass enforces a per-invocation cap
+// (NORMALIZE_LLM_CAP, default 90) so the cumulative runtime stays inside the
+// 300s hard cap on the weekly scheduler.
+
+/**
+ * Run a normalize pass, returning `null` on failure so the handler response
+ * stays 200 and the other passes can continue. Failures are logged to
+ * Cloud Logging via `console.error`.
+ */
+async function safeNormalize(
+  db: DbClient,
+  label: string,
+  fn: (db: DbClient) => Promise<unknown>
+): Promise<unknown | null> {
+  try {
+    return await fn(db);
+  } catch (err) {
+    console.error(`[normalize] ${label} failed (continuing):`, err);
+    return null;
+  }
+}
 
 export const handler: HttpFunction = async (req, res) => {
   // Trace logging: Google's standard trace header. Scheduler sends this on every
@@ -65,11 +91,27 @@ export const handler: HttpFunction = async (req, res) => {
       }
     }
 
+    // M3 — Heading Normalization (SII-71): run all three passes in order
+    // (Pass 1 → Pass 2 → Pass 3). Per Decision P1+P2, the handler runs all
+    // three. The CLIs remain available for manual backfills. Each pass is
+    // wrapped in safeNormalize so a single failure does not abort the others
+    // — the response stays 200 and the failing pass reports `null`.
+    const pass1 = await safeNormalize(db, "pass1 (bundles)", (db) =>
+      normalizeBundles(db)
+    );
+    const pass2 = await safeNormalize(db, "pass2 (regex)", (db) =>
+      normalizeRegex(db)
+    );
+    const pass3 = await safeNormalize(db, "pass3 (llm)", (db) =>
+      normalizeLlm(db)
+    );
+
     res.status(200).json({
       ok: true,
       newCatalogs: result.newCatalogs,
       newOffers: result.newOffers,
       tracked: result.tracked,
+      normalize: { pass1, pass2, pass3 },
     });
   } catch (err) {
     if (err instanceof TjekRateLimitError) {

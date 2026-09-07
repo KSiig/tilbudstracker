@@ -126,27 +126,48 @@ export function parseResponse(json: any): ClusterResult[] {
 }
 
 /**
+ * Per-call fetch timeout for the LLM endpoint. Without this, a stalled
+ * MiniMax connection could hang until the Cloud Function 300s timeout,
+ * blocking Pass 3 completion. The default of 30s is well below the
+ * per-call budget in `.env.example` (~3s typical) and the PASS-3 total
+ * (cap × throttle + 30s). Exported so tests can override it.
+ */
+export const LLM_FETCH_TIMEOUT_MS = 30_000;
+
+/**
  * Send one prompt and parse the result. `fetchImpl` defaults to global `fetch`
- * so tests can stub it without monkey-patching globals.
+ * so tests can stub it without monkey-patching globals. An `AbortController`
+ * enforces {@link LLM_FETCH_TIMEOUT_MS}; on timeout the in-flight fetch is
+ * aborted and the AbortError surfaces as the rejected promise — the caller
+ * in `normalizeLlm` catches and continues, so the loop is never crashed by
+ * a single stalled call.
  */
 export async function clusterHeadings(
   config: LlmConfig,
   headings: string[],
   fetchImpl: typeof fetch = fetch,
+  timeoutMs: number = LLM_FETCH_TIMEOUT_MS,
 ): Promise<ClusterResult[]> {
-  const resp = await fetchImpl(`${config.baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${config.apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(buildRequestBody(config, headings)),
-  });
-  if (!resp.ok) {
-    throw new Error(`llm_http_${resp.status}`);
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const resp = await fetchImpl(`${config.baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${config.apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(buildRequestBody(config, headings)),
+      signal: controller.signal,
+    });
+    if (!resp.ok) {
+      throw new Error(`llm_http_${resp.status}`);
+    }
+    const data = await resp.json();
+    return parseResponse(data);
+  } finally {
+    clearTimeout(timeoutId);
   }
-  const data = await resp.json();
-  return parseResponse(data);
 }
 
 /**

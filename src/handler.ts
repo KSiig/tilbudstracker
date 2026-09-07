@@ -20,9 +20,38 @@ import { normalizeLlm } from "./normalize/llm.js";
 // the Cloud Scheduler section in README.md for the `--headers` wiring.
 
 /**
- * Run a normalize pass, returning `null` on failure so the handler response
- * stays 200 and the other passes can continue. Failures are logged to
- * Cloud Logging via `console.error`.
+ * Classify an error as transient (retryable by the Cloud Scheduler via a
+ * non-2xx HTTP status) or permanent (logic bug — keep the 200 response so
+ * the rest of the work, e.g. the daily scrape result, still ships).
+ *
+ * Transient:
+ *   - `D1TimeoutError` from a slow D1 REST call (decision B3 / SII-15).
+ *   - `D1ClientError` with `retryable=true` (5xx/408/429 from the D1 REST
+ *     endpoint, or a network error caught by the D1 client).
+ *   - `TypeError` from a stalled or failed fetch (e.g. a MiniMax network
+ *     error that bubbles up before normalizeLlm's per-call try/catch).
+ *   - `Error` with `name === "AbortError"` — the AbortController timeout
+ *     fired (see `clusterHeadings` in llm.ts).
+ *
+ * Permanent: anything else (parse errors, schema mismatches, logic bugs).
+ * Permanent failures are swallowed so a single bad bundle does not abort
+ * the response; transient failures re-throw so the outer catch can return
+ * a retryable 5xx status.
+ */
+function isTransientError(err: unknown): boolean {
+  if (err instanceof D1TimeoutError) return true;
+  if (err instanceof D1ClientError && err.retryable) return true;
+  if (err instanceof TypeError) return true;
+  if (err instanceof Error && err.name === "AbortError") return true;
+  return false;
+}
+
+/**
+ * Run a normalize pass. Returns `null` on a *permanent* failure so the
+ * handler response stays 200 and downstream chain logic can skip subsequent
+ * passes (see handler.ts ordering). On a *transient* failure the error is
+ * re-thrown so the outer catch can return a retryable 503/500 to Cloud
+ * Scheduler. Failures are logged to Cloud Logging via `console.error`.
  */
 async function safeNormalize(
   db: DbClient,
@@ -32,7 +61,11 @@ async function safeNormalize(
   try {
     return await fn(db);
   } catch (err) {
-    console.error(`[normalize] ${label} failed (continuing):`, err);
+    if (isTransientError(err)) {
+      console.error(`[normalize] ${label} failed transiently (re-throwing for retry):`, err);
+      throw err;
+    }
+    console.error(`[normalize] ${label} failed permanently (continuing):`, err);
     return null;
   }
 }
@@ -105,20 +138,32 @@ export const handler: HttpFunction = async (req, res) => {
     // set. The daily cron omits the header, so it gets scrape-only and never
     // burns Token Plan quota. The weekly cron sets the header and triggers
     // the full normalization suite. Per Decision P1+P2, the handler runs
-    // all three passes when invoked weekly. Each pass is wrapped in
-    // safeNormalize so a single failure does not abort the others — the
-    // response stays 200 and the failing pass reports `null`.
+    // all three passes when invoked weekly.
+    //
+    // Pass chain (Pass 1 → Pass 2 → Pass 3) is enforced because each
+    // downstream pass depends on the upstream pass having succeeded:
+    //   - Pass 2 (regex) filters `is_split = 0`, which includes the
+    //     bundle-spawned per-product rows created by Pass 1. If Pass 1
+    //     failed, Pass 2 would normalize un-split bundles as singletons.
+    //   - Pass 3 (LLM) depends on Pass 2 having claimed the easy groups so
+    //     the LLM is not called on offers already normalized.
+    // A transient failure re-throws through `safeNormalize` and the outer
+    // catch surfaces a retryable 5xx; a permanent failure returns `null`
+    // and the chain aborts (downstream passes are skipped) without a 5xx.
     const normalizeRequested =
       req.headers["x-weekly-normalize"] === "true";
-    const pass1 = normalizeRequested
-      ? await safeNormalize(db, "pass1 (bundles)", (db) => normalizeBundles(db))
-      : null;
-    const pass2 = normalizeRequested
-      ? await safeNormalize(db, "pass2 (regex)", (db) => normalizeRegex(db))
-      : null;
-    const pass3 = normalizeRequested
-      ? await safeNormalize(db, "pass3 (llm)", (db) => normalizeLlm(db))
-      : null;
+    let pass1: unknown | null = null;
+    let pass2: unknown | null = null;
+    let pass3: unknown | null = null;
+    if (normalizeRequested) {
+      pass1 = await safeNormalize(db, "pass1 (bundles)", (db) => normalizeBundles(db));
+      if (pass1 !== null) {
+        pass2 = await safeNormalize(db, "pass2 (regex)", (db) => normalizeRegex(db));
+        if (pass2 !== null) {
+          pass3 = await safeNormalize(db, "pass3 (llm)", (db) => normalizeLlm(db));
+        }
+      }
+    }
 
     res.status(200).json({
       ok: true,
@@ -136,6 +181,19 @@ export const handler: HttpFunction = async (req, res) => {
     if (err instanceof D1TimeoutError) {
       res.set("Retry-After", "30");
       res.status(503).json({ ok: false, error: "d1_timeout" });
+      return;
+    }
+    if (isTransientError(err)) {
+      // Normalize passes threw a transient error (network / MiniMax abort /
+      // retryable D1). Surface a retryable 5xx so Cloud Scheduler retries
+      // the weekly job — without this, the scheduler would see a 200 with
+      // passN=null and consider the run successful.
+      res.set("Retry-After", "60");
+      res.status(503).json({
+        ok: false,
+        error: "normalize_transient",
+        cause: err instanceof Error ? err.message : String(err),
+      });
       return;
     }
     res.status(500).json({

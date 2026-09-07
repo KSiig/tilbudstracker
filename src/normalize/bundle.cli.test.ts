@@ -188,4 +188,49 @@ describe("normalizeBundles (end-to-end against sqlite)", () => {
 
     await db.close();
   });
+
+  it("uses the persisted per-product ids ordered by position, not the locally generated newIds (v2 finding #3)", async () => {
+    // Pre-seed two per-product rows whose ids are *different* from what a
+    // fresh randomUUID() would produce. The CLI must (a) skip the INSERT
+    // OR IGNORE for those positions, (b) reload the actual persisted ids
+    // ordered by position, and (c) write bundle_ids referencing those
+    // exact persisted ids — not the locally generated random ones.
+    const db = await createDb("sqlite");
+    await seedBundleCandidate(
+      db,
+      "bundle-1",
+      "1,2 kg Hakket Dansk Grise- og Kalvekød 8-12 %, 900-1200 g Hamburgerryg af Dansk Gris eller 1,8 kg Rose Dansk Hel Kylling",
+    );
+    const now = new Date().toISOString();
+    const persisted = ["pp-pos-0", "pp-pos-1", "pp-pos-2"];
+    for (let i = 0; i < persisted.length; i++) {
+      await db.run(
+        `INSERT INTO offers
+           (id, catalogId, storeId, heading, price, validFrom, validUntil, scrapedAt,
+            is_split, normalized_id, bundle_split_id, position)
+         VALUES (?, 'cat-1', 'store-1', ?, 9.95, '2026-01-01', '2026-01-08', ?,
+                 0, NULL, 'bundle-1', ?)`,
+        [persisted[i], `1,2 kg pre-existing segment ${i}`, now, i]
+      );
+    }
+
+    const result = await normalizeBundles(db);
+    expect(result.bundlesDetected).toBe(1);
+
+    const original = await db.get<{ is_split: number; bundle_ids: string | null }>(
+      `SELECT is_split, bundle_ids FROM offers WHERE id = 'bundle-1'`
+    );
+    expect(original?.is_split).toBe(1);
+    const ids = JSON.parse(original!.bundle_ids!) as string[];
+    // The CLI must use the persisted ids ordered by position — NOT the
+    // random UUIDs from the fresh `newIds` array.
+    expect(ids).toEqual(persisted);
+    // And all three ids must actually exist in the offers table.
+    for (const id of ids) {
+      const row = await db.get<{ id: string }>(`SELECT id FROM offers WHERE id = ?`, [id]);
+      expect(row?.id).toBe(id);
+    }
+
+    await db.close();
+  });
 });

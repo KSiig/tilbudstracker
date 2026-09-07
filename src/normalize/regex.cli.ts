@@ -20,6 +20,7 @@
  */
 import { createDb, type DbClient } from "../db.js";
 import { trivialNormalize } from "./regex.js";
+import { pathToFileURL } from "node:url";
 
 interface UnnormalizedOffer {
   id: string;
@@ -44,8 +45,11 @@ const SQL_INSERT_NORMALIZED = `
   RETURNING id
 `;
 
+// Defensive `AND normalized_id IS NULL` guard mirrors the Pass 3 (LLM)
+// pattern: a stale retry or a concurrent run of `pnpm normalize:regex`
+// must not overwrite an existing `normalized_id` assignment.
 const SQL_LINK_OFFER = `
-  UPDATE offers SET normalized_id = ? WHERE id = ?
+  UPDATE offers SET normalized_id = ? WHERE id = ? AND normalized_id IS NULL
 `;
 
 const NOW = () => new Date().toISOString();
@@ -156,10 +160,12 @@ export async function normalizeRegex(
 }
 
 // CLI entrypoint — invoked by `pnpm normalize:regex`. Guarded so importing
-// this module from tests does not open a real database.
+// this module from tests does not open a real database. Use `pathToFileURL`
+// instead of string-concatting `file://` so paths with spaces, encoded
+// characters, or Windows drive letters compare equal to `import.meta.url`.
 const isMainModule = (() => {
   try {
-    return import.meta.url === `file://${process.argv[1]}`;
+    return import.meta.url === pathToFileURL(process.argv[1]).href;
   } catch {
     return false;
   }

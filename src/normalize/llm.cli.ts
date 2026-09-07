@@ -6,9 +6,10 @@
  *   pnpm normalize:llm             # write assignments to the configured DB
  *   pnpm normalize:llm --dry-run   # print proposed clusters, no DB writes
  *
- * The dry-run flag uses a fake DbClient that records writes in memory and
- * never touches sqlite or D1. The real fetch is still made — set
- * `MINIMAX_API_KEY_PERSONAL` in the env for it to succeed.
+ * The `--dry-run` flag makes ONE live paid API request to the configured
+ * MiniMax endpoint and prints the proposed clusters to stdout. It does not
+ * open or write to any database. Set `MINIMAX_API_KEY_PERSONAL` in the env
+ * for the request to succeed.
  */
 import { createDb } from "../db.js";
 import {

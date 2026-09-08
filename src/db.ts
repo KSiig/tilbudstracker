@@ -113,6 +113,15 @@ const SCHEMA_SQL = `
     quarantined INTEGER NOT NULL DEFAULT 0
   );
 
+  CREATE TABLE IF NOT EXISTS offers_normalized (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    title          TEXT    NOT NULL,
+    created_at     TEXT    NOT NULL,
+    created_by     TEXT    NOT NULL CHECK (created_by IN ('system:regex','system:llm','user')),
+    notes          TEXT,
+    superseded_by  INTEGER REFERENCES offers_normalized(id)
+  );
+
   CREATE TABLE IF NOT EXISTS offers (
     id TEXT PRIMARY KEY,
     catalogId TEXT NOT NULL REFERENCES catalogs(id),
@@ -137,7 +146,10 @@ const SCHEMA_SQL = `
     validFrom TEXT NOT NULL,
     validUntil TEXT NOT NULL,
     imageUrl TEXT,
-    scrapedAt TEXT NOT NULL
+    scrapedAt TEXT NOT NULL,
+    normalized_id INTEGER REFERENCES offers_normalized(id),
+    is_split      INTEGER NOT NULL DEFAULT 0,
+    bundle_ids    TEXT
   );
 
   CREATE INDEX IF NOT EXISTS idx_offers_store_valid ON offers(storeId, validFrom);
@@ -333,7 +345,9 @@ async function createSqliteClient(): Promise<DbClient> {
   const db = new Database(DB_PATH);
   db.pragma("foreign_keys = ON");
   db.exec(SCHEMA_SQL);
-  return new SqliteClient(db);
+  const client = new SqliteClient(db);
+  await runColumnMigrations(client);
+  return client;
 }
 
 function schemaStatements(): Array<{ sql: string }> {
@@ -363,6 +377,21 @@ const COLUMN_MIGRATIONS: ReadonlyArray<{
     column: "quarantined",
     ddl: "quarantined INTEGER NOT NULL DEFAULT 0",
   },
+  {
+    table: "offers",
+    column: "normalized_id",
+    ddl: "normalized_id INTEGER REFERENCES offers_normalized(id)",
+  },
+  {
+    table: "offers",
+    column: "is_split",
+    ddl: "is_split INTEGER NOT NULL DEFAULT 0",
+  },
+  {
+    table: "offers",
+    column: "bundle_ids",
+    ddl: "bundle_ids TEXT",
+  },
 ];
 
 async function ensureColumn(
@@ -382,6 +411,28 @@ async function runColumnMigrations(client: DbClient): Promise<void> {
   for (const m of COLUMN_MIGRATIONS) {
     await ensureColumn(client, m.table, m.column, m.ddl);
   }
+  // Indexes that depend on columns added above. Done last so legacy DBs that
+  // pre-date SII-68 don't trip CREATE INDEX on a not-yet-existing column.
+  await ensureIndex(
+    client,
+    "offers",
+    "idx_offers_normalized_id",
+    "CREATE INDEX IF NOT EXISTS idx_offers_normalized_id ON offers(normalized_id)"
+  );
+}
+
+async function ensureIndex(
+  client: DbClient,
+  table: string,
+  indexName: string,
+  ddl: string
+): Promise<void> {
+  const rows = await client.all<{ name: string }>(
+    `SELECT name FROM sqlite_master WHERE type='index' AND tbl_name=? AND name=?`,
+    [table, indexName]
+  );
+  if (rows.some((r) => r.name === indexName)) return;
+  await client.run(ddl);
 }
 
 async function createD1Client(): Promise<DbClient> {

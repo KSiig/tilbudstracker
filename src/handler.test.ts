@@ -80,12 +80,21 @@ function makeReq(opts: {
   url?: string;
   body?: any;
   headers?: Record<string, string>;
+  weekly?: boolean;
 } = {}) {
+  // Default to weekly mode so existing happy-path tests still exercise the
+  // normalize passes. Pass `weekly: false` to simulate the daily cron
+  // (header omitted → passes skipped). Explicit caller headers always win
+  // so tests can also exercise non-default header values like "false".
+  const headers: Record<string, string> = { ...(opts.headers ?? {}) };
+  if (opts.weekly !== false && !("x-weekly-normalize" in headers)) {
+    headers["x-weekly-normalize"] = "true";
+  }
   return {
     method: opts.method ?? "POST",
     url: opts.url ?? "/",
     body: opts.body ?? "",
-    headers: opts.headers ?? {},
+    headers,
   } as any;
 }
 
@@ -130,7 +139,12 @@ describe("handler — happy path", () => {
       newCatalogs: 1,
       newOffers: 2,
       tracked: 1,
-      normalize: { pass1: PASS1_RESULT, pass2: PASS2_RESULT, pass3: PASS3_RESULT },
+      normalize: {
+        pass1: PASS1_RESULT,
+        pass2: PASS2_RESULT,
+        pass3: PASS3_RESULT,
+        weeklyRequested: true,
+      },
     });
     expect(closeMock).toHaveBeenCalledTimes(1);
     expect(createDb).toHaveBeenCalledWith("d1");
@@ -196,6 +210,7 @@ describe("handler — request validation", () => {
       pass1: PASS1_RESULT,
       pass2: PASS2_RESULT,
       pass3: PASS3_RESULT,
+      weeklyRequested: true,
     });
     expect(scrape).toHaveBeenCalledTimes(1);
   });
@@ -301,6 +316,7 @@ describe("handler — normalize passes (SII-71)", () => {
       pass1: PASS1_RESULT,
       pass2: PASS2_RESULT,
       pass3: PASS3_RESULT,
+      weeklyRequested: true,
     });
   });
 
@@ -347,7 +363,12 @@ describe("handler — normalize passes (SII-71)", () => {
     const res = new FakeRes();
     await handler(makeReq(), res as any);
     expect(res.statusCode).toBe(200);
-    expect(res.body.normalize).toEqual({ pass1: null, pass2: null, pass3: null });
+    expect(res.body.normalize).toEqual({
+      pass1: null,
+      pass2: null,
+      pass3: null,
+      weeklyRequested: true,
+    });
     expect(res.body.newCatalogs).toBe(1);
     expect(res.body.newOffers).toBe(2);
     expect(res.body.tracked).toBe(1);
@@ -359,6 +380,45 @@ describe("handler — normalize passes (SII-71)", () => {
     await handler(makeReq(), res as any);
     expect(res.statusCode).toBe(500);
     expect(res.body.error).toBe("scrape boom");
+    expect(normalizeBundles).not.toHaveBeenCalled();
+    expect(normalizeRegex).not.toHaveBeenCalled();
+    expect(normalizeLlm).not.toHaveBeenCalled();
+  });
+
+  it("daily cron (no X-Weekly-Normalize header) skips all 3 normalize passes and does not call the CLIs", async () => {
+    // Finding #2: the daily scrape cron must NOT burn Token Plan quota by
+    // triggering the expensive normalize passes. Only the weekly cron sets
+    // X-Weekly-Normalize: true.
+    (scrape as any).mockResolvedValue({
+      newCatalogs: 1,
+      newOffers: 2,
+      tracked: 1,
+    });
+    const res = new FakeRes();
+    await handler(makeReq({ weekly: false }), res as any);
+    expect(res.statusCode).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.normalize).toEqual({
+      pass1: null,
+      pass2: null,
+      pass3: null,
+      weeklyRequested: false,
+    });
+    expect(normalizeBundles).not.toHaveBeenCalled();
+    expect(normalizeRegex).not.toHaveBeenCalled();
+    expect(normalizeLlm).not.toHaveBeenCalled();
+  });
+
+  it("X-Weekly-Normalize: false is also treated as daily (not weekly)", async () => {
+    // The header must be the literal string "true" to enable the weekly
+    // path. Anything else (false, missing, "1", "yes") is treated as the
+    // daily path so a misconfigured cron doesn't silently burn quota.
+    const res = new FakeRes();
+    await handler(
+      makeReq({ headers: { "x-weekly-normalize": "false" } }),
+      res as any
+    );
+    expect(res.body.normalize.weeklyRequested).toBe(false);
     expect(normalizeBundles).not.toHaveBeenCalled();
     expect(normalizeRegex).not.toHaveBeenCalled();
     expect(normalizeLlm).not.toHaveBeenCalled();

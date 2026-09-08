@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isBundle, parseBundle } from "./bundle.js";
+import { BundleParseError, isBundle, parseBundle } from "./bundle.js";
 
 const KYLING_BUNDLE =
   "1,2 kg Hakket Dansk Grise- og Kalvekød 8-12 %, 900-1200 g Hamburgerryg af Dansk Gris eller 1,8 kg Rose Dansk Hel Kylling";
@@ -60,7 +60,28 @@ describe("parseBundle", () => {
   });
 
   it("drops empty segments after trimming", () => {
-    const segments = parseBundle("  Foo eller   Bar eller Baz  ");
-    expect(segments).toEqual(["Foo", "Bar", "Baz"]);
+    // Unit tokens are required for non-empty segments since bundle-parse
+    // tightening (M3 stack-review finding #4). Test data uses unit tokens on
+    // every non-empty segment to exercise only the empty-drop behavior.
+    const segments = parseBundle("  1 kg Foo eller   500 g Bar eller 2 stk Baz  ");
+    expect(segments).toEqual(["1 kg Foo", "500 g Bar", "2 stk Baz"]);
+  });
+
+  it("rejects headings where any non-empty segment lacks a unit token (finding #4)", () => {
+    // "Hakket Dansk Grise- og Kalvekød 8-12 %" has '%' but no kg/g/l/cl/ml/stk.
+    // The whole heading must be rejected — per-product rows without a unit
+    // are not addressable downstream.
+    const heading =
+      "Hakket Dansk Grise- og Kalvekød 8-12 %, 900-1200 g Hamburgerryg af Dansk Gris eller 1,8 kg Rose Dansk Hel Kylling";
+    expect(isBundle(heading)).toBe(false);
+    expect(() => parseBundle(heading)).toThrow(BundleParseError);
+  });
+
+  it("BundleParseError names the offending segment", () => {
+    expect(() =>
+      parseBundle(
+        "8-12 % Hakket Gris eller 1 kg Rose Kylling"
+      )
+    ).toThrow(/8-12 % Hakket Gris/);
   });
 });

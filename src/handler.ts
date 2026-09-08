@@ -7,8 +7,17 @@ import { normalizeLlm } from "./normalize/llm.js";
 
 // Cloud Function runtime budget: `--timeout=300s` and scheduler
 // `--attempt-deadline=320s`. The LLM pass enforces a per-invocation cap
-// (NORMALIZE_LLM_CAP, default 90) so the cumulative runtime stays inside the
-// 300s hard cap on the weekly scheduler.
+// (NORMALIZE_LLM_CAP, default 60 — see .env.example for the math) so the
+// cumulative runtime stays inside the 300s hard cap on the weekly scheduler.
+//
+// Weekly-vs-daily invocation marker: the expensive normalize passes
+// (Pass 1 → Pass 2 → Pass 3) only fire when the request carries
+// `X-Weekly-Normalize: true`. The OIDC identity token still authenticates
+// the request; this header is the explicit signal that the weekly
+// `tilbudstracker-weekly-normalize` cron (Sunday 06:30 Europe/Copenhagen)
+// is calling. The daily `tilbudstracker-daily` cron (06:00) does NOT set
+// the header, so it scrapes only and never burns Token Plan quota. See
+// the Cloud Scheduler section in README.md for the `--headers` wiring.
 
 /**
  * Run a normalize pass, returning `null` on failure so the handler response
@@ -92,26 +101,31 @@ export const handler: HttpFunction = async (req, res) => {
     }
 
     // M3 — Heading Normalization (SII-71): run all three passes in order
-    // (Pass 1 → Pass 2 → Pass 3). Per Decision P1+P2, the handler runs all
-    // three. The CLIs remain available for manual backfills. Each pass is
-    // wrapped in safeNormalize so a single failure does not abort the others
-    // — the response stays 200 and the failing pass reports `null`.
-    const pass1 = await safeNormalize(db, "pass1 (bundles)", (db) =>
-      normalizeBundles(db)
-    );
-    const pass2 = await safeNormalize(db, "pass2 (regex)", (db) =>
-      normalizeRegex(db)
-    );
-    const pass3 = await safeNormalize(db, "pass3 (llm)", (db) =>
-      normalizeLlm(db)
-    );
+    // (Pass 1 → Pass 2 → Pass 3), but ONLY when the weekly marker header is
+    // set. The daily cron omits the header, so it gets scrape-only and never
+    // burns Token Plan quota. The weekly cron sets the header and triggers
+    // the full normalization suite. Per Decision P1+P2, the handler runs
+    // all three passes when invoked weekly. Each pass is wrapped in
+    // safeNormalize so a single failure does not abort the others — the
+    // response stays 200 and the failing pass reports `null`.
+    const normalizeRequested =
+      req.headers["x-weekly-normalize"] === "true";
+    const pass1 = normalizeRequested
+      ? await safeNormalize(db, "pass1 (bundles)", (db) => normalizeBundles(db))
+      : null;
+    const pass2 = normalizeRequested
+      ? await safeNormalize(db, "pass2 (regex)", (db) => normalizeRegex(db))
+      : null;
+    const pass3 = normalizeRequested
+      ? await safeNormalize(db, "pass3 (llm)", (db) => normalizeLlm(db))
+      : null;
 
     res.status(200).json({
       ok: true,
       newCatalogs: result.newCatalogs,
       newOffers: result.newOffers,
       tracked: result.tracked,
-      normalize: { pass1, pass2, pass3 },
+      normalize: { pass1, pass2, pass3, weeklyRequested: normalizeRequested },
     });
   } catch (err) {
     if (err instanceof TjekRateLimitError) {

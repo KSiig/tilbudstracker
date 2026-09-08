@@ -164,13 +164,25 @@ const SCHEMA_SQL = `
     scrapedAt TEXT NOT NULL,
     normalized_id INTEGER REFERENCES offers_normalized(id),
     is_split      INTEGER NOT NULL DEFAULT 0,
-    bundle_ids    TEXT
+    bundle_ids    TEXT,
+    -- Idempotency columns for Pass 1 (bundle detection). On per-product rows
+    -- spawned by splitting a bundle, 'bundle_split_id' is the original
+    -- bundle's id and 'position' is the 0-based segment index. Together they
+    -- make a retry of Pass 1 a no-op via the partial unique index
+    -- 'idx_offers_bundle_split_pos' below and 'INSERT OR IGNORE' in the CLI.
+    bundle_split_id TEXT,
+    position INTEGER
   );
 
   CREATE INDEX IF NOT EXISTS idx_offers_store_valid ON offers(storeId, validFrom);
   CREATE INDEX IF NOT EXISTS idx_offers_heading ON offers(heading);
   CREATE INDEX IF NOT EXISTS idx_offers_catalog ON offers(catalogId);
   CREATE INDEX IF NOT EXISTS idx_catalogs_store ON catalogs(storeId);
+  -- Note: idx_offers_normalized_id and idx_offers_bundle_split_pos depend on
+  -- columns added by COLUMN_MIGRATIONS below and are therefore created via
+  -- ensureIndex() after the columns exist. Adding them here would break the
+  -- legacy-table migration path (CREATE INDEX on a missing column fails
+  -- before runColumnMigrations runs).
 `;
 
 class SqliteClient implements DbClient {
@@ -408,6 +420,16 @@ const COLUMN_MIGRATIONS: ReadonlyArray<{
     column: "bundle_ids",
     ddl: "bundle_ids TEXT",
   },
+  {
+    table: "offers",
+    column: "bundle_split_id",
+    ddl: "bundle_split_id TEXT",
+  },
+  {
+    table: "offers",
+    column: "position",
+    ddl: "position INTEGER",
+  },
 ];
 
 async function ensureColumn(
@@ -434,6 +456,17 @@ async function runColumnMigrations(client: DbClient): Promise<void> {
     "offers",
     "idx_offers_normalized_id",
     "CREATE INDEX IF NOT EXISTS idx_offers_normalized_id ON offers(normalized_id)"
+  );
+  // Partial unique index for the bundle-split idempotency key. Partial so it
+  // only constrains per-product rows (bundle_split_id NOT NULL); originals
+  // (bundle_split_id NULL) are unconstrained. Combined with INSERT OR
+  // IGNORE in bundle.cli.ts, a retry of Pass 1 that has partially committed
+  // is a no-op.
+  await ensureIndex(
+    client,
+    "offers",
+    "idx_offers_bundle_split_pos",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_offers_bundle_split_pos ON offers(bundle_split_id, position) WHERE bundle_split_id IS NOT NULL"
   );
 }
 

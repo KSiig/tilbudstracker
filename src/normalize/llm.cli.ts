@@ -53,16 +53,8 @@ async function runDryRun(config: LlmConfig): Promise<void> {
   }
 }
 
-async function runWrite(): Promise<void> {
+async function runWrite(config: LlmConfig): Promise<void> {
   const db = await createDb();
-  const config = defaultConfig();
-  if (!config.apiKey) {
-    console.error(
-      "MINIMAX_API_KEY_PERSONAL is not set; pass it via the env or .env file before running.",
-    );
-    await db.close();
-    process.exit(1);
-  }
   const { normalizeLlm } = await import("./llm.js");
   const result = await normalizeLlm(db, config);
   console.log(JSON.stringify(result, null, 2));
@@ -70,8 +62,15 @@ async function runWrite(): Promise<void> {
 }
 
 const dryRun = getFlag("dry-run");
+const config = defaultConfig();
+if (!config.apiKey) {
+  console.error(
+    "MINIMAX_API_KEY_PERSONAL is not set; pass it via the env or .env file before running.",
+  );
+  process.exit(1);
+}
 if (dryRun) {
-  await runDryRun(defaultConfig());
+  await runDryRun(config);
 } else {
-  await runWrite();
+  await runWrite(config);
 }

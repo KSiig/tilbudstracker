@@ -5,7 +5,9 @@ import {
 import {
   buildRequestBody,
   clusterHeadings,
+  DEFAULT_CAP,
   normalizeLlm,
+  parseCap,
   parseResponse,
   throttle,
   type LlmConfig,
@@ -514,5 +516,159 @@ describe("normalizeLlm", () => {
     // First call all() returns []; normalizeLlm should early-return with zeros.
     const result = await normalizeLlm(db, CONFIG);
     expect(result.promptsSent).toBe(0);
+  });
+
+  it("dedupes overlapping member_indices across clusters (no offer linked twice)", async () => {
+    // Finding #9: if the model returns overlapping member_indices across
+    // clusters in the same response, the second occurrence must be dropped so
+    // the same offer isn't linked to two different offers_normalized rows.
+    const db = new FakeDb();
+    db.offers.push(
+      makeOffer("o1", "Hel kylling"),
+      makeOffer("o2", "Rose hel kylling"),
+      makeOffer("o3", "Hakket oksekød"),
+    );
+
+    const fetchImpl = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                tool_calls: [
+                  {
+                    function: {
+                      name: "record_clusters",
+                      arguments: JSON.stringify({
+                        // Cluster 1 claims o1 + o2; cluster 2 ALSO claims o1
+                        // (overlap). The dedup pass should drop o1 from
+                        // cluster 2, leaving it with only o3 (a singleton)
+                        // → no second cluster is written.
+                        clusters: [
+                          { title: "hel kylling", member_indices: [0, 1] },
+                          { title: "hel kylling again", member_indices: [0, 2] },
+                        ],
+                      }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+
+    const result = await normalizeLlm({
+      db,
+      config: CONFIG,
+      cap: 90,
+      now: () => "2026-09-07T00:00:00.000Z",
+      fetchImpl: fetchImpl as any,
+      sleep: async () => {},
+      rng: () => 0,
+    });
+
+    expect(result.clustersCreated).toBe(1);
+    expect(result.offersNormalized).toBe(2);
+    expect(db.offers.find((o) => o.id === "o1")!.normalized_id).toBe(1);
+    expect(db.offers.find((o) => o.id === "o2")!.normalized_id).toBe(1);
+    // o3 was claimed only by cluster 2, but cluster 2 had its only unique
+    // member (o1) stolen by cluster 1; o3 alone fails the ≥2 check, so o3
+    // remains unlinked.
+    expect(db.offers.find((o) => o.id === "o3")!.normalized_id).toBeNull();
+  });
+});
+
+describe("parseCap (M3 stack-review finding #5)", () => {
+  it("returns DEFAULT_CAP for missing env", () => {
+    expect(parseCap(undefined)).toBe(DEFAULT_CAP);
+    expect(parseCap("")).toBe(DEFAULT_CAP);
+  });
+
+  it("returns DEFAULT_CAP for non-finite / non-numeric / negative / zero", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(parseCap("NaN")).toBe(DEFAULT_CAP);
+    expect(parseCap("abc")).toBe(DEFAULT_CAP);
+    expect(parseCap("-5")).toBe(DEFAULT_CAP);
+    expect(parseCap("0")).toBe(DEFAULT_CAP);
+    expect(parseCap("1.5")).toBe(DEFAULT_CAP);
+    expect(parseCap("Infinity")).toBe(DEFAULT_CAP);
+    expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  it("returns the parsed positive integer when valid", () => {
+    expect(parseCap("1")).toBe(1);
+    expect(parseCap("60")).toBe(60);
+    expect(parseCap("90")).toBe(90);
+    expect(parseCap("1000")).toBe(1000);
+  });
+
+  it("uses the validated cap in normalizeLlm, not the raw env value", async () => {
+    const db = new FakeDb();
+    // 100 offers → 5 batches of 20. cap=3 stops the loop after 3 prompts.
+    for (let i = 0; i < 100; i++) {
+      db.offers.push(makeOffer(`o${i}`, `unique heading ${i}`));
+    }
+    const fetchImpl = vi.fn(async () =>
+      new Response(JSON.stringify({ choices: [{ message: { tool_calls: [] } }] }), { status: 200 }),
+    );
+
+    const result = await normalizeLlm({
+      db,
+      config: CONFIG,
+      cap: parseCap("3"), // valid positive integer
+      now: () => "2026-09-07T00:00:00.000Z",
+      fetchImpl: fetchImpl as any,
+      sleep: async () => {},
+      rng: () => 0,
+    });
+    expect(result.promptsSent).toBe(3);
+    expect(result.capReached).toBe(true);
+  });
+
+  it("falls back to DEFAULT_CAP for an invalid env value", async () => {
+    // 100 offers / 20 per batch = 5 batches. With DEFAULT_CAP=60 the loop
+    // processes all 5 batches and reports capReached=false.
+    const db = new FakeDb();
+    for (let i = 0; i < 100; i++) {
+      db.offers.push(makeOffer(`o${i}`, `unique heading ${i}`));
+    }
+    const fetchImpl = vi.fn(async () =>
+      new Response(JSON.stringify({ choices: [{ message: { tool_calls: [] } }] }), { status: 200 }),
+    );
+
+    const result = await normalizeLlm({
+      db,
+      config: CONFIG,
+      cap: parseCap("garbage"), // invalid → DEFAULT_CAP
+      now: () => "2026-09-07T00:00:00.000Z",
+      fetchImpl: fetchImpl as any,
+      sleep: async () => {},
+      rng: () => 0,
+    });
+    expect(result.promptsSent).toBe(5);
+    expect(result.capReached).toBe(false);
+  });
+});
+
+describe("buildPrompt (M3 stack-review finding #6)", () => {
+  it("JSON example uses single braces, not double braces", () => {
+    const p = buildPrompt(["Hel kylling"]);
+    // Single braces present
+    expect(p).toContain('"clusters":');
+    expect(p).toContain('"member_indices":');
+    // No doubled-up {{ or }} anywhere
+    expect(p).not.toContain("{{");
+    expect(p).not.toContain("}}");
+  });
+
+  it("instructs the model to call record_clusters, not return raw JSON", () => {
+    const p = buildPrompt(["Hel kylling"]);
+    expect(p).toMatch(/record_clusters/);
+    // No "Output JSON only" prose (the tool call IS the response)
+    expect(p).not.toMatch(/Output JSON only/i);
   });
 });

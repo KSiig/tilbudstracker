@@ -58,7 +58,7 @@ const SQL_SELECT_BUNDLE_CANDIDATES = `
 `;
 
 const INSERT_PER_PRODUCT_SQL = `
-  INSERT INTO offers (
+  INSERT OR IGNORE INTO offers (
     id, catalogId, storeId, heading, description,
     price, prePrice, currency,
     unitSymbol, siUnit, siFactor,
@@ -66,7 +66,8 @@ const INSERT_PER_PRODUCT_SQL = `
     computedUnitPrice, unitPriceKind,
     normalizedUnitPrice, normalizedAt, normalizationNote,
     validFrom, validUntil, imageUrl, scrapedAt,
-    normalized_id, is_split, bundle_ids
+    normalized_id, is_split, bundle_ids,
+    bundle_split_id, position
   ) VALUES (
     ?, ?, ?, ?, ?,
     ?, ?, ?,
@@ -75,14 +76,15 @@ const INSERT_PER_PRODUCT_SQL = `
     NULL, NULL,
     NULL, NULL, NULL,
     ?, ?, ?, ?,
-    NULL, 0, NULL
+    NULL, 0, NULL,
+    ?, ?
   )
 `;
 
 const MARK_BUNDLE_SQL = `
   UPDATE offers
   SET is_split = 1, bundle_ids = ?
-  WHERE id = ?
+  WHERE id = ? AND is_split = 0
 `;
 
 /**
@@ -97,17 +99,30 @@ export async function normalizeBundles(
 
   let bundlesDetected = 0;
   let newOffersCreated = 0;
-  const statements: Array<{ sql: string; params: any[] }> = [];
 
+  // Per-bundle atomic batches: each bundle's per-product INSERTs and the
+  // original-row UPDATE go in their own db.batch([...]) call. On SQLite this
+  // is a real transaction (all-or-nothing); on D1 the REST batch endpoint is
+  // not transactional, so the idempotency columns + INSERT OR IGNORE below
+  // make a retry safe even if a previous attempt partially committed.
   for (const offer of candidates) {
     if (!isBundle(offer.heading)) continue;
 
-    const segments = parseBundle(offer.heading);
+    let segments: string[];
+    try {
+      segments = parseBundle(offer.heading);
+    } catch {
+      // BundleParseError — segment without a unit token. isBundle already
+      // returned true based on the whole-heading unit-token check, but
+      // parseBundle now rejects the heading. Skip the bundle entirely.
+      continue;
+    }
     if (segments.length < 2) continue;
 
     const newIds: string[] = segments.map(() => randomUUID());
     bundlesDetected += 1;
 
+    const statements: Array<{ sql: string; params: any[] }> = [];
     for (let i = 0; i < segments.length; i++) {
       statements.push({
         sql: INSERT_PER_PRODUCT_SQL,
@@ -127,6 +142,15 @@ export async function normalizeBundles(
           offer.validUntil,
           offer.imageUrl,
           offer.scrapedAt,
+          // Idempotency key: (bundle_split_id, position) is unique for
+          // per-product rows. Re-running this CLI generates a fresh
+          // randomUUID() for `newIds[i]`, but `INSERT OR IGNORE` plus the
+          // partial unique index `idx_offers_bundle_split_pos` skips any
+          // duplicate (bundle_split_id, position) pair from a prior
+          // partial commit. The MARK_BUNDLE_SQL `WHERE id = ? AND is_split
+          // = 0` guard makes the UPDATE itself idempotent.
+          offer.id,
+          i,
         ],
       });
     }
@@ -136,11 +160,8 @@ export async function normalizeBundles(
       params: [JSON.stringify(newIds), offer.id],
     });
 
-    newOffersCreated += segments.length;
-  }
-
-  if (statements.length > 0) {
     await db.batch(statements);
+    newOffersCreated += segments.length;
   }
 
   return { bundlesDetected, newOffersCreated };

@@ -165,11 +165,31 @@ export interface NormalizeLlmResult {
 }
 
 /**
- * Per-invocation cap. The Cloud Function has a 300s timeout; at ~3s/call the
- * hard ceiling before saturation is ~90 calls. SII-71 may invoke this weekly,
- * so each run picks up a fresh slice and the remainder waits for the next run.
+ * Per-invocation cap. The Cloud Function has a 300s timeout. The default of
+ * 60 leaves room for the prior daily scrape (~30s), per-call latency
+ * (~3s), and the 350ms post-call throttle; see `.env.example` for the math.
+ * The weekly scheduler invokes this; each run picks up a fresh slice and the
+ * remainder waits for the next run.
  */
-const DEFAULT_CAP = 90;
+export const DEFAULT_CAP = 60;
+
+/**
+ * Resolve the `NORMALIZE_LLM_CAP` env value to a positive integer, falling
+ * back to {@link DEFAULT_CAP} when missing, non-finite, non-positive, or
+ * non-integer. A bad cap would let the loop burn past the Cloud Function
+ * 300s timeout; this validator keeps the loop safely bounded.
+ */
+export function parseCap(value: string | undefined): number {
+  if (value === undefined || value === "") return DEFAULT_CAP;
+  const n = Number(value);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) {
+    console.warn(
+      `[normalize:llm] NORMALIZE_LLM_CAP=${JSON.stringify(value)} is invalid; falling back to DEFAULT_CAP=${DEFAULT_CAP}`
+    );
+    return DEFAULT_CAP;
+  }
+  return n;
+}
 
 /**
  * Max headings per prompt. Keeps the per-call token budget predictable and
@@ -202,7 +222,7 @@ export async function normalizeLlm(
     : {
         db: dbOrDeps,
         config: defaultConfig(configOverride),
-        cap: Number(process.env.NORMALIZE_LLM_CAP ?? DEFAULT_CAP),
+        cap: parseCap(process.env.NORMALIZE_LLM_CAP),
         now: () => new Date().toISOString(),
         fetchImpl: fetch,
         sleep: throttle,
@@ -261,13 +281,18 @@ export async function normalizeLlm(
     // 3. Write one offers_normalized row per cluster, then point the
     //    member offers at it. Skip clusters that reference noise indices
     //    outside the slice — those are singletons, not useful for Pass 3.
+    //    Also dedupe across clusters: if the model assigns the same offer
+    //    to two clusters, the first claim wins and the duplicate is dropped
+    //    from subsequent clusters. Without this, an offer could be linked to
+    //    two different `offers_normalized` rows by the same prompt run.
     const sliceIds = new Set(slice.map((r) => r.id));
     const idByIndex = new Map(combined.map((r, i) => [i, r.id] as const));
+    const claimed = new Set<string>();
 
     for (const cluster of clusters) {
       const memberIds = cluster.member_indices
         .map((i) => idByIndex.get(i))
-        .filter((id): id is string => typeof id === "string" && sliceIds.has(id));
+        .filter((id): id is string => typeof id === "string" && sliceIds.has(id) && !claimed.has(id));
       if (memberIds.length < 2) continue;
 
       const normRow = await db.get<{ id: number }>(
@@ -284,6 +309,7 @@ export async function normalizeLlm(
           params: [normRow.id, id],
         })),
       );
+      for (const id of memberIds) claimed.add(id);
       clustersCreated += 1;
       offersNormalized += memberIds.length;
     }

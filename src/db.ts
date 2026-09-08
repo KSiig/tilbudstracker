@@ -4,7 +4,22 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DB_PATH = path.resolve(__dirname, "..", "data", "tilbud.db");
+const DEFAULT_DB_PATH = path.resolve(__dirname, "..", "data", "tilbud.db");
+/**
+ * Path to the local sqlite database. Defaults to `<repo>/data/tilbud.db`.
+ * Override with `TILBUD_DB_PATH` env var — primarily for tests that need an
+ * isolated sqlite file and would otherwise race with `db.test.ts` on the
+ * shared default path. Tests must clear/remove the file themselves;
+ * `createDb("sqlite")` does not manage the file's lifecycle beyond opening it.
+ *
+ * Resolved on every call so test setups that flip the env var between cases
+ * actually take effect. Previously a module-constant `const DB_PATH`; the
+ * change to a function is internal-only and does not alter behavior at any
+ * existing call site.
+ */
+export function resolveDbPath(): string {
+  return process.env.TILBUD_DB_PATH ?? DEFAULT_DB_PATH;
+}
 
 const CLOUDFLARE_D1_QUERY_URL = (accountId: string, databaseId: string) =>
   `https://api.cloudflare.com/client/v4/accounts/${accountId}/d1/database/${databaseId}/query`;
@@ -340,9 +355,10 @@ function requireEnv(name: string): string {
 }
 
 async function createSqliteClient(): Promise<DbClient> {
-  mkdirSync(path.dirname(DB_PATH), { recursive: true });
+  const dbPath = resolveDbPath();
+  mkdirSync(path.dirname(dbPath), { recursive: true });
   const { default: Database } = await import("better-sqlite3");
-  const db = new Database(DB_PATH);
+  const db = new Database(dbPath);
   db.pragma("foreign_keys = ON");
   db.exec(SCHEMA_SQL);
   const client = new SqliteClient(db);

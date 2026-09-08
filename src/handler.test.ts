@@ -273,15 +273,21 @@ describe("handler — error classification", () => {
     expect(closeMock).toHaveBeenCalledTimes(1);
   });
 
-  it("D1ClientError(retryable) twice → 500, second error in body, close once", async () => {
+  it("D1ClientError(retryable) twice → 503 + Retry-After, cause in body, close once", async () => {
+    // The retryable D1ClientError is classified as a transient failure by
+    // `isTransientError` in handler.ts, so the outer catch returns a
+    // retryable 503 with Retry-After: 60 — a more accurate signal than 500
+    // for the Cloud Scheduler. The body still carries the underlying cause.
     const second = new D1ClientError("net2", true);
     (scrape as any)
       .mockRejectedValueOnce(new D1ClientError("net1", true))
       .mockRejectedValueOnce(second);
     const res = new FakeRes();
     await handler(makeReq(), res as any);
-    expect(res.statusCode).toBe(500);
-    expect(String(res.body.error)).toContain("net2");
+    expect(res.statusCode).toBe(503);
+    expect(res.headers["retry-after"]).toBe("60");
+    expect(res.body.error).toBe("normalize_transient");
+    expect(String(res.body.cause)).toContain("net2");
     expect(scrape).toHaveBeenCalledTimes(2);
     expect(closeMock).toHaveBeenCalledTimes(1);
   });
@@ -320,28 +326,34 @@ describe("handler — normalize passes (SII-71)", () => {
     });
   });
 
-  it("normalize pass1 throws → pass1 is null, pass2/pass3 still run, response is 200", async () => {
+  it("normalize pass1 fails permanently → pass1 is null, chain aborts, pass2/pass3 NOT called, response is 200", async () => {
+    // Pass chain (Pass 1 → Pass 2 → Pass 3): a permanent failure on Pass 1
+    // returns null and the chain aborts — Pass 2's `WHERE is_split = 0`
+    // filter includes un-split bundle rows that would otherwise fold as
+    // singletons, so Pass 2 must be skipped. Same reasoning for Pass 3.
     (normalizeBundles as any).mockRejectedValue(new Error("bundles boom"));
     const res = new FakeRes();
     await handler(makeReq(), res as any);
     expect(res.statusCode).toBe(200);
     expect(res.body.normalize.pass1).toBeNull();
-    expect(res.body.normalize.pass2).toEqual(PASS2_RESULT);
-    expect(res.body.normalize.pass3).toEqual(PASS3_RESULT);
-    expect(normalizeRegex).toHaveBeenCalledTimes(1);
-    expect(normalizeLlm).toHaveBeenCalledTimes(1);
+    expect(res.body.normalize.pass2).toBeNull();
+    expect(res.body.normalize.pass3).toBeNull();
+    expect(normalizeBundles).toHaveBeenCalledTimes(1);
+    expect(normalizeRegex).not.toHaveBeenCalled();
+    expect(normalizeLlm).not.toHaveBeenCalled();
   });
 
-  it("normalize pass2 throws → pass2 is null, pass1/pass3 still run, response is 200", async () => {
+  it("normalize pass2 fails permanently → pass2 is null, chain aborts, pass3 NOT called, response is 200", async () => {
     (normalizeRegex as any).mockRejectedValue(new Error("regex boom"));
     const res = new FakeRes();
     await handler(makeReq(), res as any);
     expect(res.statusCode).toBe(200);
     expect(res.body.normalize.pass1).toEqual(PASS1_RESULT);
     expect(res.body.normalize.pass2).toBeNull();
-    expect(res.body.normalize.pass3).toEqual(PASS3_RESULT);
+    expect(res.body.normalize.pass3).toBeNull();
     expect(normalizeBundles).toHaveBeenCalledTimes(1);
-    expect(normalizeLlm).toHaveBeenCalledTimes(1);
+    expect(normalizeRegex).toHaveBeenCalledTimes(1);
+    expect(normalizeLlm).not.toHaveBeenCalled();
   });
 
   it("normalize pass3 throws → pass3 is null, pass1/pass2 still run, response is 200", async () => {
@@ -372,6 +384,68 @@ describe("handler — normalize passes (SII-71)", () => {
     expect(res.body.newCatalogs).toBe(1);
     expect(res.body.newOffers).toBe(2);
     expect(res.body.tracked).toBe(1);
+  });
+
+  it("pass1 throws transient (D1ClientError retryable) → 503 + Retry-After, chain aborts, pass2/pass3 NOT called", async () => {
+    // Finding #1+#2: transient normalize failures surface 503 so Cloud
+    // Scheduler retries. The chain also aborts — pass2/pass3 must not run
+    // when pass1 failed because their inputs depend on pass1 having
+    // succeeded.
+    (normalizeBundles as any).mockRejectedValue(new D1ClientError("d1 lock", true));
+    const res = new FakeRes();
+    await handler(makeReq(), res as any);
+    expect(res.statusCode).toBe(503);
+    expect(res.headers["retry-after"]).toBe("60");
+    expect(res.body.error).toBe("normalize_transient");
+    expect(String(res.body.cause)).toContain("d1 lock");
+    expect(normalizeBundles).toHaveBeenCalledTimes(1);
+    expect(normalizeRegex).not.toHaveBeenCalled();
+    expect(normalizeLlm).not.toHaveBeenCalled();
+    expect(closeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("pass2 throws transient (D1TimeoutError) → 503 + Retry-After: 30, chain aborts, pass3 NOT called", async () => {
+    // D1TimeoutError is mapped to the dedicated `d1_timeout` 503 status
+    // (decision B3 / SII-15), so this surfaces with Retry-After: 30.
+    (normalizeRegex as any).mockRejectedValue(new D1TimeoutError("d1 timeout"));
+    const res = new FakeRes();
+    await handler(makeReq(), res as any);
+    expect(res.statusCode).toBe(503);
+    expect(res.headers["retry-after"]).toBe("30");
+    expect(res.body.error).toBe("d1_timeout");
+    expect(normalizeBundles).toHaveBeenCalledTimes(1);
+    expect(normalizeRegex).toHaveBeenCalledTimes(1);
+    expect(normalizeLlm).not.toHaveBeenCalled();
+    expect(closeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("pass3 throws transient (TypeError / fetch failure) → 503 + Retry-After: 60, pass1/pass2 already ran", async () => {
+    // TypeError is treated as transient (network errors surface that way).
+    (normalizeLlm as any).mockRejectedValue(new TypeError("fetch failed"));
+    const res = new FakeRes();
+    await handler(makeReq(), res as any);
+    expect(res.statusCode).toBe(503);
+    expect(res.headers["retry-after"]).toBe("60");
+    expect(res.body.error).toBe("normalize_transient");
+    expect(String(res.body.cause)).toContain("fetch failed");
+    expect(normalizeBundles).toHaveBeenCalledTimes(1);
+    expect(normalizeRegex).toHaveBeenCalledTimes(1);
+    expect(normalizeLlm).toHaveBeenCalledTimes(1);
+    expect(closeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("pass3 throws transient (AbortError from clusterHeadings timeout) → 503 + Retry-After: 60", async () => {
+    // AbortError is treated as transient (an AbortController timeout fired
+    // inside clusterHeadings; the LLM call was aborted, not a logic bug).
+    (normalizeLlm as any).mockRejectedValue(
+      Object.assign(new Error("aborted"), { name: "AbortError" }),
+    );
+    const res = new FakeRes();
+    await handler(makeReq(), res as any);
+    expect(res.statusCode).toBe(503);
+    expect(res.headers["retry-after"]).toBe("60");
+    expect(res.body.error).toBe("normalize_transient");
+    expect(closeMock).toHaveBeenCalledTimes(1);
   });
 
   it("scrape failure still skips all normalize passes (error path unchanged)", async () => {

@@ -10,8 +10,13 @@
  *      imageUrl/scrapedAt verbatim. Size/piece/unit-price fields are NULL
  *      (cannot be derived from the bundle). `normalized_id` is NULL (Pass 2
  *      will assign).
- *   2. UPDATE the original bundle row: `is_split = 1`,
- *      `bundle_ids = JSON.stringify(newIds)`.
+ *   2. Reload the persisted per-product ids ordered by position, then
+ *      UPDATE the original bundle row: `is_split = 1`,
+ *      `bundle_ids = JSON.stringify(persistedIds)`. Reloading — instead of
+ *      reusing the locally generated `newIds` — ensures `bundle_ids` only
+ *      references rows that actually exist (a prior partial commit may
+ *      have left a different set of ids behind, and `INSERT OR IGNORE`
+ *      skips duplicates on the retry).
  *
  * Idempotent: the `WHERE is_split = 0 AND normalized_id IS NULL` filter means
  * a second invocation is a no-op.
@@ -22,6 +27,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { pathToFileURL } from "node:url";
 import { createDb, type DbClient } from "../db.js";
 import { isBundle, parseBundle } from "./bundle.js";
 
@@ -87,6 +93,17 @@ const MARK_BUNDLE_SQL = `
   WHERE id = ? AND is_split = 0
 `;
 
+// Reload the per-product rows that actually persisted for this bundle,
+// ordered by position so bundle_ids[i] matches segment[i]. `INSERT OR
+// IGNORE` may have skipped rows whose (bundle_split_id, position) pair
+// already existed from a prior partial commit; the locally constructed
+// `newIds` array would then reference rows that were never inserted.
+const SQL_RELOAD_PERSISTED_IDS = `
+  SELECT id FROM offers
+  WHERE bundle_split_id = ?
+  ORDER BY position
+`;
+
 /**
  * Run Pass 1 against `db`. Exported for the handler integration (SII-71);
  * the CLI entrypoint below is a thin wrapper that opens `createDb()` and
@@ -147,20 +164,30 @@ export async function normalizeBundles(
           // randomUUID() for `newIds[i]`, but `INSERT OR IGNORE` plus the
           // partial unique index `idx_offers_bundle_split_pos` skips any
           // duplicate (bundle_split_id, position) pair from a prior
-          // partial commit. The MARK_BUNDLE_SQL `WHERE id = ? AND is_split
-          // = 0` guard makes the UPDATE itself idempotent.
+          // partial commit. The reload-and-mark step below uses the
+          // persisted ids (ordered by position) so bundle_ids only
+          // references rows that actually exist.
           offer.id,
           i,
         ],
       });
     }
 
-    statements.push({
-      sql: MARK_BUNDLE_SQL,
-      params: [JSON.stringify(newIds), offer.id],
-    });
-
+    // Run the INSERT batch first; on SQLite this is a transaction, on D1 it
+    // is best-effort and INSERT OR IGNORE makes retries safe.
     await db.batch(statements);
+
+    // Reload the persisted per-product rows ordered by position, then
+    // UPDATE the original bundle row with those ids. This guarantees
+    // bundle_ids references rows that actually exist (a partial-commit
+    // retry may have left a different set of per-product ids in the DB
+    // than the fresh `newIds` we just generated above).
+    const persisted = await db.all<{ id: string }>(SQL_RELOAD_PERSISTED_IDS, [
+      offer.id,
+    ]);
+    const persistedIds = persisted.map((r) => r.id);
+
+    await db.run(MARK_BUNDLE_SQL, [JSON.stringify(persistedIds), offer.id]);
     newOffersCreated += segments.length;
   }
 
@@ -168,10 +195,12 @@ export async function normalizeBundles(
 }
 
 // CLI entrypoint — invoked by `pnpm normalize:bundles`. Guarded so importing
-// this module from tests does not open a real database.
+// this module from tests does not open a real database. Use `pathToFileURL`
+// instead of string-concatting `file://` so paths with spaces, encoded
+// characters, or Windows drive letters compare equal to `import.meta.url`.
 const isMainModule = (() => {
   try {
-    return import.meta.url === `file://${process.argv[1]}`;
+    return import.meta.url === pathToFileURL(process.argv[1]).href;
   } catch {
     return false;
   }

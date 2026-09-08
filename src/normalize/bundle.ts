@@ -12,9 +12,12 @@
  *      `cl`, `ml`, `stk`). This excludes pairings that aren't really
  *      bundles (e.g. "kyllingebrystfilet eller -inderfilet" — same cut, two
  *      parts, no unit).
- *   3. After splitting on " eller " AND `,\s+`, at least two of the resulting
- *      segments must contain a unit token. This is the "≥ 2 segments with
- *      unit" check.
+ *   3. After splitting on " eller " AND `,\s+`, at least two segments must
+ *      remain AND every non-empty segment must contain a unit token
+ *      (kg / g / l / cl / ml / stk). A segment without a unit is not
+ *      addressable as a per-product row (e.g. "8-12 %" carries no unit),
+ *      so `parseBundle` throws `BundleParseError` for the whole heading
+ *      and `isBundle` returns false.
  *
  * Critical: the split separator is `,\s+` (comma-space), NEVER bare `,`.
  * Danish decimals are `1,2 kg` — splitting on bare `,` would shred

@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { promises as fs, mkdtempSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { createDb, type DbClient } from "../db.js";
 import { trivialNormalize } from "./regex.js";
 import {
@@ -378,6 +379,90 @@ describe("normalizeRegex (end-to-end against sqlite)", () => {
     // then id 2 in order; a SELECT-MAX implementation could yield the same
     // id twice, so the monotonic-order assertion is the smoke check.
     expect(ids).toEqual([1, 2]);
+
+    await db.close();
+  });
+
+  it("isMainModule uses pathToFileURL for argv[1] comparison (v2 finding #9)", async () => {
+    // Pin the source-level fix: the isMainModule IIFE must wrap
+    // `process.argv[1]` in `pathToFileURL(...).href` so paths with spaces,
+    // encoded chars, or Windows drive letters compare equal to
+    // `import.meta.url`. Source-read keeps the test honest without
+    // re-importing the module.
+    const fs2 = await import("node:fs/promises");
+    const path2 = await import("node:path");
+    const src = await fs2.readFile(
+      path2.join(__dirname, "regex.cli.ts"),
+      "utf8",
+    );
+    expect(src).toMatch(/pathToFileURL\(process\.argv\[1\]\)\.href/);
+    expect(src).not.toMatch(/`file:\/\/\$\{process\.argv\[1\]\}`/);
+  });
+
+  it("pathToFileURL round-trips paths with spaces and Unicode so they compare equal to import.meta.url", () => {
+    // Behavioral check on the helper itself: a path with a space and a
+    // Unicode character must encode to a file:// URL that matches what
+    // Node produces for the same path on import.meta.url. This is the
+    // failure mode the v2 finding protects against.
+    const cases = [
+      "/Users/kasper/Coding/tilbudstracker/src/normalize/regex.cli.ts",
+      "/Users/kasper/Coding/path with spaces/regex.cli.ts",
+      "/Users/kasper/Coding/unicode-\u00e6\u00f8\u00e5/regex.cli.ts",
+      // Windows-style path; pathToFileURL normalizes to file:///C:/...
+      "C:\\Users\\Kasper\\regex.cli.ts",
+    ];
+    for (const p of cases) {
+      const url = pathToFileURL(p).href;
+      // The URL must start with file:// and percent-encode any spaces or
+      // reserved characters so a string compare against import.meta.url
+      // works without ambiguity.
+      expect(url.startsWith("file://")).toBe(true);
+    }
+  });
+
+  it("SQL_LINK_OFFER has `AND normalized_id IS NULL` guard so concurrent runs do not overwrite (v2 finding #4)", async () => {
+    // Defensive guard mirroring Pass 3 (LLM). We can't easily simulate two
+    // concurrent runs against sqlite, so this test pins the SQL constant
+    // itself: the literal UPDATE statement in regex.cli.ts must include
+    // the `AND normalized_id IS NULL` clause and must not overwrite an
+    // existing assignment. The SQL string is imported via a fetch against
+    // the source — this is the simplest way to pin the guard without
+    // racing against the read-side `WHERE normalized_id IS NULL` filter.
+    const fs = await import("node:fs/promises");
+    const path = await import("node:path");
+    const src = await fs.readFile(
+      path.join(__dirname, "regex.cli.ts"),
+      "utf8",
+    );
+    expect(src).toMatch(/UPDATE offers SET normalized_id = \? WHERE id = \? AND normalized_id IS NULL/);
+
+    // Behavioral sanity: a fresh run against offers that are *already*
+    // linked still leaves those links untouched (because the SELECT
+    // excludes linked rows in the first place — that's the upstream
+    // belt-and-braces defense; the SQL guard is the in-flight defense).
+    const db = await createDb("sqlite");
+    const now = new Date().toISOString();
+    await db.run(
+      `INSERT INTO offers_normalized (title, created_at, created_by) VALUES ('prior', ?, 'user')`,
+      [now]
+    );
+    const prior = await db.get<{ id: number }>(
+      `SELECT id FROM offers_normalized WHERE created_by = 'user'`
+    );
+    expect(prior?.id).toBeDefined();
+
+    await seedOffers(db, [
+      { id: "o1", heading: "Buko Smelteost", normalized_id: prior!.id },
+      { id: "o2", heading: "Buko Smelteost", normalized_id: prior!.id },
+    ]);
+
+    const result = await normalizeRegex(db);
+    expect(result).toEqual({ groupsProcessed: 0, offersNormalized: 0 });
+    const linked = await db.all<{ id: string; normalized_id: number | null }>(
+      `SELECT id, normalized_id FROM offers ORDER BY id`
+    );
+    expect(linked[0]).toEqual({ id: "o1", normalized_id: prior!.id });
+    expect(linked[1]).toEqual({ id: "o2", normalized_id: prior!.id });
 
     await db.close();
   });

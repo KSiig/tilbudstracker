@@ -212,6 +212,68 @@ describe("clusterHeadings", () => {
       /llm_http_500/,
     );
   });
+
+  it("aborts in-flight fetch after timeoutMs (mocked fetch that never resolves)", async () => {
+    // Finding (v2 #5): a stalled MiniMax call must abort after the
+    // per-call timeout (default 30s) rather than hang until the Cloud
+    // Function 300s deadline. We use a tiny override (50ms) so the test
+    // runs quickly. The fetch promise must see an AbortSignal that has
+    // been aborted before the next microtask resolves.
+    let receivedSignal: AbortSignal | undefined;
+    const fetchImpl = vi.fn(
+      (_url: string, init: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          receivedSignal = init.signal as AbortSignal;
+          init.signal?.addEventListener("abort", () => {
+            const err = new Error("aborted");
+            err.name = "AbortError";
+            reject(err);
+          });
+        }),
+    );
+    const start = Date.now();
+    await expect(
+      clusterHeadings(CONFIG, ["x"], fetchImpl as any, 50),
+    ).rejects.toThrow(/aborted/i);
+    const elapsed = Date.now() - start;
+    // Should have fired roughly within 50ms + jitter — allow a generous
+    // upper bound so CI doesn't flake.
+    expect(elapsed).toBeLessThan(2_000);
+    expect(receivedSignal?.aborted).toBe(true);
+  });
+
+  it("does not abort when the fetch resolves before timeoutMs", async () => {
+    const fetchImpl = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                tool_calls: [
+                  {
+                    function: {
+                      name: "record_clusters",
+                      arguments: JSON.stringify({
+                        clusters: [{ title: "x", member_indices: [0, 1] }],
+                      }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+    const result = await clusterHeadings(CONFIG, ["a", "b"], fetchImpl as any, 5_000);
+    expect(result).toEqual([{ title: "x", member_indices: [0, 1] }]);
+    // The init.signal must be present on the call so fetch wiring is
+    // exercised.
+    const init = (fetchImpl.mock.calls[0] as unknown as [string, RequestInit])[1];
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    expect((init.signal as AbortSignal).aborted).toBe(false);
+  });
 });
 
 describe("throttle", () => {

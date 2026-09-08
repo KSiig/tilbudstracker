@@ -42,8 +42,20 @@ Schema (`CREATE TABLE IF NOT EXISTS` plus indexes) is applied when the client op
 | `pnpm track --from=d1 --list-file=<path>` | Bulk-enable tracking for every dealer id listed in `<path>` (one id per line) |
 | `pnpm untrack <id>` | Disable tracking for a store |
 | `pnpm stats` | Show database statistics |
+| `pnpm normalize:regex` | Run Pass 2: group offers by trivial case/punctuation fold and write `offers_normalized` rows. |
+| `pnpm normalize:bundles` | Run Pass 1: detect multi-product offers ("X eller Y"), create per-product rows, mark originals `is_split = 1`. |
+| `pnpm normalize:llm` | Run Pass 3: cluster the remaining un-normalized headings with MiniMax M3. |
 
 ## How it works
+
+### Normalization
+
+See [`docs/normalization.md`](docs/normalization.md) for the full spec.
+
+The three passes run in order: Pass 1 (bundles) → Pass 2 (trivial fold) → Pass 3 (LLM). Pass 1 must run first so Pass 2's `is_split = 0` filter picks up per-product rows.
+
+The LLM pass uses MiniMax M3 via the OpenAI-compat endpoint (`https://api.minimax.io/v1/chat/completions`). Token Plan key in `MINIMAX_API_KEY_PERSONAL`. The structured output uses the `tools` function-call API (no markdown to strip).
+
 
 1. **Store sync**: fetches all dealers from the Tjek API and upserts them into the `stores` table. New stores are auto-discovered and logged.
 2. **Catalog scrape**: for each tracked store, fetches current catalogs. Skips catalogs already in the database.
@@ -224,3 +236,8 @@ SQLite database at `data/tilbud.db`. Key tables:
 - `stores` — all known stores, with `isTracked` flag
 - `catalogs` — catalog metadata with publish dates and validity windows
 - `offers` — individual offers with raw quantity data, computed unit prices, and LLM normalization fields
+- `offers_normalized` — one row per normalized product identity
+  (id, title, created_at, created_by, notes, superseded_by)
+
+Many `offers` map to one `offers_normalized` row via `offers.normalized_id`.
+Bundle offers use `is_split = 1` + `offers.bundle_ids = JSON.stringify([new_id, ...])` instead — the original bundle row stays, new per-product rows get their own `normalized_id`.

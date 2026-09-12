@@ -4,6 +4,9 @@ data/*.db
 data/*.db-journal
 data/*.db-wal
 data/*.db-shm
+data/off.parquet
+data/off-dk-neighbours.json
+data/off-dk-neighbours.jsonl
 *.tgz
 stores.md
 

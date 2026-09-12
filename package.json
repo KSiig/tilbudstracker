@@ -21,7 +21,6 @@
     "normalize:llm": "tsx src/normalize/llm.cli.ts",
     "gen-stores": "tsx src/gen-stores-md.ts",
     "apply-stores": "tsx src/apply-stores.ts",
-    "normalize:llm": "tsx src/normalize/llm.cli.ts",
     "build": "tsc",
     "test": "vitest run"
   },
